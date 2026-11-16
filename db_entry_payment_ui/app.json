@@ -1,0 +1,53 @@
+{
+  "expo": {
+    "name": "Entry Payment",
+    "slug": "entry-payment",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "entrypayment",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "icon": "./assets/expo.icon",
+      "bundleIdentifier": "com.entrypayment.app",
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.entrypayment.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#16191E",
+        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "backgroundImage": "./assets/images/android-icon-background.png",
+        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "output": "static",
+      "favicon": "./assets/images/favicon.png"
+    },
+    "plugins": [
+      "./plugins/withShortNativePaths",
+      "./plugins/withApiNetworkSecurity",
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#16191E",
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 76
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "Allow Entry Payment to take a member photo."
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    }
+  }
+}

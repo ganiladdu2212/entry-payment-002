@@ -1,0 +1,15 @@
+# Local credentials and generated files must not be shared with source code.
+.env
+.env.*
+!.env.example
+*.log
+artifacts/
+node_modules/
+.expo/
+target/
+*.apk
+*.aab
+*.jks
+*.keystore
+*.pem
+*.key

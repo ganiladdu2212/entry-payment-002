@@ -1,0 +1,45 @@
+spring:
+  application:
+    name: entry-payment-api
+  profiles:
+    default: local
+  datasource:
+    url: ${DB_URL:jdbc:mysql://localhost:3306/entry_payment?createDatabaseIfNotExist=true&useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Kolkata}
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  jpa:
+    open-in-view: false
+    database-platform: org.hibernate.dialect.MySQLDialect
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: Asia/Kolkata
+
+server:
+  port: ${PORT:8090}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: when-authorized
+
+info:
+  app:
+    name: Entry Payment API
+    description: API for the Entry Payment gym management platform
+
+app:
+  cors:
+    allowed-origins: ${APP_CORS_ALLOWED_ORIGINS:http://localhost:8081,http://localhost:19006,http://localhost:3000}
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: alpha
