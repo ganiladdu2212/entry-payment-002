@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Entry Payment",
+    "name": "Entry Gate",
     "slug": "entry-payment",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -33,7 +33,7 @@
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#16191E",
+          "backgroundColor": "#0F1115",
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 76
         }
@@ -41,7 +41,7 @@
       [
         "expo-image-picker",
         {
-          "cameraPermission": "Allow Entry Payment to take a member photo."
+          "cameraPermission": "Allow Entry Gate to take a member photo."
         }
       ]
     ],

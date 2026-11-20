@@ -20,6 +20,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StatusBar } from 'expo-status-bar';
 import Feather from '@expo/vector-icons/Feather';
 import * as ImagePicker from 'expo-image-picker';
+import TextRecognition from '@react-native-ml-kit/text-recognition';
 
 import { API_BASE_URL } from '../config/api';
 
@@ -236,6 +237,79 @@ function firstName(name: string) {
   return name.trim().split(/\s+/)[0] || name;
 }
 
+const PRIMARY_TXN_LABEL = /\b(?:google|phonepe|paytm)\s*(?:transaction|txn)\s*(?:id|no\.?|number)\b/i;
+const TRANSACTION_LABEL = /\b(?:transaction|txn|payment)\s*(?:id|no\.?|number)\b/i;
+const REFERENCE_LABEL =
+  /\b(?:(?:upi|payment)\s*)?(?:utr|rrn)\b|\b(?:(?:upi|payment)\s*)?(?:reference|ref)\s*(?:id|no\.?|number)\b/i;
+const ID_VALUE = /\b(?=[a-z0-9/_-]{6,}\b)(?=[a-z0-9/_-]*\d)[a-z0-9][a-z0-9/_-]{5,}\b/i;
+
+function valueAfterLabel(lines: string[], lineIndex: number, label: RegExp): string | undefined {
+  const line = lines[lineIndex];
+  const match = line.match(label);
+  if (!match || match.index === undefined) {
+    return undefined;
+  }
+
+  const sameLineValue = line
+    .slice(match.index + match[0].length)
+    .replace(/^\s*[:#=\-]?\s*/, '')
+    .match(ID_VALUE)?.[0];
+  if (sameLineValue) {
+    return sameLineValue;
+  }
+
+  for (let offset = 1; offset <= 2; offset += 1) {
+    const nextLine = lines[lineIndex + offset];
+    if (!nextLine || PRIMARY_TXN_LABEL.test(nextLine) || TRANSACTION_LABEL.test(nextLine) || REFERENCE_LABEL.test(nextLine)) {
+      break;
+    }
+    const value = nextLine.match(ID_VALUE)?.[0];
+    if (value) {
+      return value;
+    }
+  }
+
+  return undefined;
+}
+
+function findTransactionId(text: string): { transactionId?: string; referenceId?: string } | null {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  let primaryTransactionId: string | undefined;
+  let transactionId: string | undefined;
+  let referenceId: string | undefined;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!primaryTransactionId && PRIMARY_TXN_LABEL.test(lines[index])) {
+      primaryTransactionId = valueAfterLabel(lines, index, PRIMARY_TXN_LABEL);
+    }
+    if (!transactionId && TRANSACTION_LABEL.test(lines[index])) {
+      transactionId = valueAfterLabel(lines, index, TRANSACTION_LABEL);
+    }
+    if (!referenceId && REFERENCE_LABEL.test(lines[index])) {
+      referenceId = valueAfterLabel(lines, index, REFERENCE_LABEL);
+    }
+  }
+
+  const resolvedTxnId = primaryTransactionId ?? transactionId;
+  if (!resolvedTxnId && !referenceId) {
+    return null;
+  }
+
+  return { transactionId: resolvedTxnId, referenceId };
+}
+
+function extractUpiUtrFromText(rawText: string): string | null {
+  if (!rawText) return null;
+  const found = findTransactionId(rawText);
+  if (found?.transactionId) return found.transactionId;
+  if (found?.referenceId) return found.referenceId;
+  return null;
+}
+
 function sortPlansByDuration(plans: Plan[]): Plan[] {
   return [...plans].sort((a, b) => a.durationMonths - b.durationMonths || a.id - b.id);
 }
@@ -285,6 +359,71 @@ async function prepareWhatsAppMessage(input: {
   initiatedBy: string;
 }) {
   return request<WhatsAppMessage>('/whatsapp/messages', { ...input, automatic: false });
+}
+
+type RoleTheme = {
+  primary: string;
+  onPrimary: string;
+  soft: string;
+  border: string;
+};
+
+function getRoleTheme(role: AppRole): RoleTheme {
+  if (role === 'MANAGEMENT') {
+    return {
+      primary: '#38BDF8',
+      onPrimary: '#082032',
+      soft: 'rgba(56, 189, 248, 0.14)',
+      border: 'rgba(56, 189, 248, 0.4)',
+    };
+  }
+  return {
+    primary: '#FFC83A',
+    onPrimary: '#1A1400',
+    soft: 'rgba(255, 200, 58, 0.14)',
+    border: 'rgba(255, 200, 58, 0.4)',
+  };
+}
+
+const RoleThemeContext = createContext<RoleTheme>(getRoleTheme('TRAINER'));
+
+function AlertBanner({ message, variant = 'error' }: { message: string; variant?: 'error' | 'success' | 'info' }) {
+  if (!message) return null;
+  const isError = variant === 'error';
+  const isSuccess = variant === 'success';
+  const icon = isError ? 'alert-circle' : isSuccess ? 'check-circle' : 'info';
+  const color = isError ? '#F87171' : isSuccess ? '#34D399' : '#38BDF8';
+  return (
+    <View
+      style={[
+        styles.alertBanner,
+        isError ? styles.alertBannerError : isSuccess ? styles.alertBannerSuccess : styles.alertBannerInfo,
+      ]}
+      accessibilityRole="alert"
+    >
+      <Feather name={icon} size={16} color={color} style={styles.alertBannerIcon} />
+      <Text style={[styles.alertBannerText, { color }]}>{message}</Text>
+    </View>
+  );
+}
+
+function PoweredByFooter({ withBottomInset = true }: { withBottomInset?: boolean }) {
+  const insets = useSafeAreaInsets();
+  return (
+    <Pressable
+      style={[
+        styles.poweredByFooter,
+        withBottomInset && { paddingBottom: Math.max(insets.bottom, 12) + 4 },
+      ]}
+      onPress={() => void Linking.openURL('https://entrypayment.com/')}
+      accessibilityRole="link"
+      accessibilityLabel="Powered by Entry Payment, entrypayment.com"
+    >
+      <Text style={styles.poweredByText}>
+        Powered by <Text style={styles.poweredByBrand}>Entry Payment</Text> · © {new Date().getFullYear()} entrypayment.com
+      </Text>
+    </Pressable>
+  );
 }
 
 const ProfileActionContext = createContext<() => void>(() => {});
@@ -436,8 +575,10 @@ export default function ManagementLoginScreen() {
     setError('');
   }
 
+  const roleTheme = getRoleTheme(appRole);
+
   function withProfile(screen: ReactNode) {
-    return <ProfileActionContext.Provider value={() => setProfileOpen(true)}>{screen}<AccountSheet visible={profileOpen} managementName={managementName} mobileNumber={cleanMobileNumber} role={appRole} onClose={() => setProfileOpen(false)} onLogout={() => { setProfileOpen(false); restart(); }} /></ProfileActionContext.Provider>;
+    return <RoleThemeContext.Provider value={roleTheme}><ProfileActionContext.Provider value={() => setProfileOpen(true)}>{screen}<AccountSheet visible={profileOpen} managementName={managementName} mobileNumber={cleanMobileNumber} role={appRole} onClose={() => setProfileOpen(false)} onLogout={() => { setProfileOpen(false); restart(); }} /></ProfileActionContext.Provider></RoleThemeContext.Provider>;
   }
 
   if (stage === 'role') {
@@ -489,9 +630,9 @@ export default function ManagementLoginScreen() {
       <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
         <KeyboardAvoidingView
           style={styles.safeArea}
-          behavior={Platform.select({ ios: 'padding', default: undefined })}
+          behavior="padding"
         >
-          <ScrollView ref={loginScrollRef} contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" automaticallyAdjustKeyboardInsets>
+          <ScrollView ref={loginScrollRef} contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" bounces={false} overScrollMode="never" automaticallyAdjustKeyboardInsets>
             <View style={styles.phoneFrame}>
               <ImageBackground
                 source={require('../../assets/images/people-fitness-hero.jpg')}
@@ -499,35 +640,48 @@ export default function ManagementLoginScreen() {
                 imageStyle={styles.heroPhoto}
               >
                 <View style={styles.heroShade} />
-                <View style={styles.statusRow}>
-                  <Text style={styles.statusTime}>9:53</Text>
-                  <View style={styles.statusIcons}>
-                    <Text style={styles.statusSignal}>▮▮▮</Text>
-                    <Text style={styles.statusSignal}>●</Text>
-                    <Text style={styles.statusSignal}>▭</Text>
+                <View style={styles.heroBottomFade} />
+                {Platform.OS === 'web' ? (
+                  <View style={styles.statusRow}>
+                    <Text style={styles.statusTime}>9:53</Text>
+                    <View style={styles.statusIcons}>
+                      <Text style={styles.statusSignal}>▮▮▮</Text>
+                      <Text style={styles.statusSignal}>●</Text>
+                      <Text style={styles.statusSignal}>▭</Text>
+                    </View>
                   </View>
-                </View>
+                ) : null}
                 <View style={styles.heroTopLine}>
-                  <Image
-                    source={require('../../assets/images/people-fitness-logo.jpg')}
-                    style={styles.logoMark}
-                    accessibilityLabel="People Fitness logo"
-                  />
-                  <Text style={styles.tagline}>STRENGTH · CARDIO</Text>
+                  <View style={styles.heroTopLeft}>
+                    <Pressable accessibilityRole="button" accessibilityLabel="Back to role selection" style={styles.heroBackBtn} disabled={loading} onPress={restart} hitSlop={10}>
+                      <Feather name="arrow-left" size={18} color="#F3F5F7" />
+                    </Pressable>
+                    <Image
+                      source={require('../../assets/images/people-fitness-logo.jpg')}
+                      style={styles.logoMark}
+                      accessibilityLabel="People Fitness logo"
+                    />
+                  </View>
+                  <View style={styles.taglinePill}>
+                    <Text style={styles.tagline}>STRENGTH · CARDIO</Text>
+                  </View>
                 </View>
                 <View style={styles.heroCopy}>
                   <Text style={styles.welcome}>WELCOME TO</Text>
-                  <Text style={styles.brandName}>People{`\n`}Fitness</Text>
-                  <Text style={styles.brandDetail}>{appRole === 'MEMBER' ? 'Member login' : appRole === 'TRAINER' ? 'Trainer login' : 'Center Management login'} ·{`\n`}powered by Entry Payment</Text>
+                  <Text style={styles.brandName}>People Fitness</Text>
+                  <View style={styles.brandMetaRow}>
+                    <View style={[styles.rolePill, { backgroundColor: roleTheme.soft, borderColor: roleTheme.border }]}>
+                      <Text style={[styles.rolePillText, { color: roleTheme.primary }]}>
+                        {appRole === 'MEMBER' ? 'Member' : appRole === 'TRAINER' ? 'Trainer' : 'Management'}
+                      </Text>
+                    </View>
+                  </View>
                 </View>
               </ImageBackground>
 
               <View style={styles.loginCard}>
                 {stage === 'mobile' ? (
                   <>
-                    <Pressable accessibilityRole="button" accessibilityLabel="Back to role selection" style={styles.changeNumberButton} disabled={loading} onPress={restart}>
-                      <Text style={styles.changeNumberText}>‹ Back to role selection</Text>
-                    </Pressable>
                     <Text style={styles.cardTitle}>Log in with your mobile number</Text>
                     <Text style={styles.cardSubtitle}>We’ll check the login method configured for your account.</Text>
                     <Text style={styles.label}>Mobile number</Text>
@@ -537,7 +691,7 @@ export default function ManagementLoginScreen() {
                         value={mobileNumber}
                         onChangeText={(value) => { setMobileNumber(value.replace(/\D/g, '').slice(0, 10)); setError(''); }}
                         placeholder="98765 01003"
-                        placeholderTextColor="#8D95A1"
+                        placeholderTextColor="#6E7785"
                         keyboardType="phone-pad"
                         maxLength={10}
                         style={styles.mobileInput}
@@ -545,18 +699,21 @@ export default function ManagementLoginScreen() {
                         onSubmitEditing={continueWithMobile}
                       />
                     </View>
-                    <Text style={styles.hint}>{appRole === 'MEMBER' ? 'Use the WhatsApp number registered by your gym.' : appRole === 'TRAINER' ? 'Use the mobile number registered by gym management.' : 'Your account must first be added by the gym management team.'}</Text>
-                    {error ? <Text style={styles.error}>{error}</Text> : null}
+                    <AlertBanner message={error} />
                     <Pressable
-                      style={[styles.primaryButton, loading && styles.disabledButton]}
+                      style={[styles.primaryButton, { backgroundColor: roleTheme.primary, shadowColor: roleTheme.primary }, loading && styles.disabledButton]}
                       onPress={continueWithMobile}
                       disabled={loading}
                     >
-                      {loading ? <ActivityIndicator color="#16191E" /> : <Text style={styles.primaryButtonText}>Continue</Text>}
+                      {loading ? <ActivityIndicator color={roleTheme.onPrimary} /> : <Text style={[styles.primaryButtonText, { color: roleTheme.onPrimary }]}>Continue</Text>}
                     </Pressable>
                   </>
                 ) : (
                   <>
+                    <Pressable style={styles.backPillButton} onPress={() => { setCredential(''); setError(''); setStage('mobile'); }} disabled={loading}>
+                      <Feather name="arrow-left" size={15} color="#9BA3B0" />
+                      <Text style={styles.backPillText}>Use a different number</Text>
+                    </Pressable>
                     <Text style={styles.cardTitle}>Welcome, {managementName}</Text>
                     <Text style={styles.cardSubtitle}>
                       {isOtp
@@ -568,7 +725,7 @@ export default function ManagementLoginScreen() {
                       value={credential}
                       onChangeText={(value) => { setCredential(isOtp ? value.replace(/\D/g, '').slice(0, 6) : value); setError(''); }}
                       placeholder={isOtp ? 'Enter passcode' : 'Enter password'}
-                      placeholderTextColor="#8D95A1"
+                      placeholderTextColor="#6E7785"
                       keyboardType={isOtp ? 'number-pad' : 'default'}
                       secureTextEntry={!isOtp}
                       maxLength={isOtp ? 6 : undefined}
@@ -576,19 +733,17 @@ export default function ManagementLoginScreen() {
                       returnKeyType="done"
                       onSubmitEditing={signIn}
                     />
-                    {error ? <Text style={styles.error}>{error}</Text> : null}
+                    <AlertBanner message={error} />
                     <Pressable
-                      style={[styles.primaryButton, loading && styles.disabledButton]}
+                      style={[styles.primaryButton, { backgroundColor: roleTheme.primary, shadowColor: roleTheme.primary }, loading && styles.disabledButton]}
                       onPress={signIn}
                       disabled={loading}
                     >
-                      {loading ? <ActivityIndicator color="#16191E" /> : <Text style={styles.primaryButtonText}>Log in</Text>}
-                    </Pressable>
-                    <Pressable style={styles.changeNumberButton} onPress={() => { setCredential(''); setError(''); setStage('mobile'); }} disabled={loading}>
-                      <Text style={styles.changeNumberText}>Use a different mobile number</Text>
+                      {loading ? <ActivityIndicator color={roleTheme.onPrimary} /> : <Text style={[styles.primaryButtonText, { color: roleTheme.onPrimary }]}>Log in</Text>}
                     </Pressable>
                   </>
                 )}
+                <PoweredByFooter />
               </View>
             </View>
           </ScrollView>
@@ -599,11 +754,56 @@ export default function ManagementLoginScreen() {
 }
 
 function RolePickerScreen({ onSelect }: { onSelect: (role: AppRole) => void }) {
-  const roles: Array<{ role: AppRole; title: string; people: string; detail: string }> = [
-    { role: 'TRAINER', title: 'Trainer', people: 'Ahmed · Kiran', detail: 'Onboard members and collect payments' },
-    { role: 'MANAGEMENT', title: 'Management', people: 'Mahesh · Bala', detail: 'Run the center, payments and reminders' },
+  const roles: Array<{ role: AppRole; title: string; people: string; detail: string; icon: 'user-check' | 'shield' | 'user' }> = [
+    { role: 'TRAINER', title: 'Trainer', people: 'Ahmed · Kiran', detail: 'Onboard members and collect payments', icon: 'user-check' },
+    { role: 'MANAGEMENT', title: 'Management', people: 'Mahesh · Bala', detail: 'Run the center, payments and reminders', icon: 'shield' },
   ];
-  return <View style={styles.screen}><SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}><View style={styles.rolePicker}><ImageBackground source={require('../../assets/images/people-fitness-hero.jpg')} style={styles.roleHero} imageStyle={styles.heroPhoto}><View style={styles.heroShade} /><Image source={require('../../assets/images/people-fitness-logo.jpg')} style={styles.logoMark} /><Text style={styles.roleKicker}>PEOPLE FITNESS</Text><Text style={styles.roleHeading}>One app,{`\n`}every workout.</Text><Text style={styles.roleDescription}>Choose how you want to enter the gym management system.</Text></ImageBackground><View style={styles.roleBody}><Text style={styles.roleTitle}>Choose your app</Text><Text style={styles.roleSubtitle}>Each role sees the tools made for their day.</Text>{roles.map((item) => <Pressable key={item.role} style={styles.roleCard} onPress={() => onSelect(item.role)}><View style={styles.roleIcon}><Text style={styles.roleIconText}>{item.role === 'MEMBER' ? '◉' : item.role === 'TRAINER' ? '⌁' : '▦'}</Text></View><View style={styles.roleCopy}><Text style={styles.roleCardTitle}>{item.title}</Text><Text style={styles.rolePeople}>{item.people}</Text><Text style={styles.roleCardDetail}>{item.detail}</Text></View><Text style={styles.homeActionArrow}>›</Text></Pressable>)}</View></View></SafeAreaView></View>;
+  return (
+    <View style={styles.screen}>
+      <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
+        <View style={styles.rolePicker}>
+          <ImageBackground source={require('../../assets/images/people-fitness-hero.jpg')} style={styles.roleHero} imageStyle={styles.heroPhoto}>
+            <View style={styles.heroShade} />
+            <View style={styles.heroBottomFade} />
+            <View style={styles.heroTopLine}>
+              <Image source={require('../../assets/images/people-fitness-logo.jpg')} style={styles.logoMark} />
+              <View style={styles.taglinePill}>
+                <Text style={styles.tagline}>ENTRY PAYMENT</Text>
+              </View>
+            </View>
+            <View>
+              <Text style={styles.roleKicker}>PEOPLE FITNESS</Text>
+              <Text style={styles.roleHeading}>One app,{`\n`}every workout.</Text>
+              <Text style={styles.roleDescription}>Choose how you want to enter the gym management system.</Text>
+            </View>
+          </ImageBackground>
+          <View style={styles.roleBody}>
+            <ScrollView style={styles.safeArea} contentContainerStyle={styles.roleBodyScroll} bounces={false} showsVerticalScrollIndicator={false}>
+              <Text style={styles.roleTitle}>Choose your role</Text>
+              <Text style={styles.roleSubtitle}>Each role sees the tools tailored for their day.</Text>
+              {roles.map((item) => {
+                const cardTheme = getRoleTheme(item.role);
+                return (
+                <Pressable key={item.role} style={[styles.roleCard, item.role === 'MANAGEMENT' && { borderColor: 'rgba(56, 189, 248, 0.35)' }]} onPress={() => onSelect(item.role)}>
+                  <View style={[styles.roleIcon, { backgroundColor: cardTheme.soft, borderColor: cardTheme.border }]}>
+                    <Feather name={item.icon} size={21} color={cardTheme.primary} />
+                  </View>
+                  <View style={styles.roleCopy}>
+                    <Text style={styles.roleCardTitle}>{item.title}</Text>
+                    <Text style={[styles.rolePeople, { color: cardTheme.primary }]}>{item.people}</Text>
+                    <Text style={styles.roleCardDetail}>{item.detail}</Text>
+                  </View>
+                  <Feather name="chevron-right" size={20} color="#6E7785" />
+                </Pressable>
+                );
+              })}
+              <PoweredByFooter />
+            </ScrollView>
+          </View>
+        </View>
+      </SafeAreaView>
+    </View>
+  );
 }
 
 function PhoneStatusBar({ dark = true }: { dark?: boolean }) {
@@ -645,20 +845,59 @@ function BottomNavigation({ managementId, onHomePress, onMembersPress, onCollect
     return () => { activeRequest = false; };
   }, [managementId]);
   const insets = useSafeAreaInsets();
+  const roleTheme = useContext(RoleThemeContext);
+  const navItems: Array<{ key: 'home' | 'members' | 'collect' | 'payments' | 'reminders'; label: string; icon: 'home' | 'users' | 'credit-card' | 'clock' | 'bell'; onPress?: () => void }> = [
+    { key: 'home', label: 'Home', icon: 'home', onPress: onHomePress },
+    { key: 'members', label: 'Members', icon: 'users', onPress: onMembersPress },
+    { key: 'collect', label: 'Collect', icon: 'credit-card', onPress: onCollectPress },
+    { key: 'payments', label: 'Payments', icon: 'clock', onPress: onPaymentsPress },
+    { key: 'reminders', label: 'Reminders', icon: 'bell', onPress: onRemindersPress },
+  ];
   return (
-    <View style={[styles.bottomNavigation, { paddingBottom: Math.max(insets.bottom, 10), height: 78 + insets.bottom }]}>
-      <Pressable style={styles.navItem} onPress={onHomePress}><View style={active === 'home' ? styles.activeNavIcon : undefined}><Text style={[styles.navIcon, active === 'home' && styles.activeNavGlyph]}>⌂</Text></View><Text style={active === 'home' ? styles.activeNavLabel : styles.navLabel}>Home</Text></Pressable>
-      <Pressable style={styles.navItem} onPress={onMembersPress}><View style={active === 'members' ? styles.activeNavIcon : undefined}><MembersNavIcon active={active === 'members'} /></View><Text style={active === 'members' ? styles.activeNavLabel : styles.navLabel}>Members</Text></Pressable>
-      <Pressable style={styles.navItem} onPress={onCollectPress}><View style={active === 'collect' ? styles.activeNavIcon : undefined}><Text style={[styles.rupeeNavIcon, active === 'collect' && styles.activeNavGlyph]}>₹</Text></View><Text style={active === 'collect' ? styles.activeNavLabel : styles.navLabel}>Collect</Text></Pressable>
-      <Pressable style={styles.navItem} onPress={onPaymentsPress}><View style={active === 'payments' ? styles.activeNavIcon : undefined}><Text style={[styles.navIcon, active === 'payments' && styles.activeNavGlyph]}>◴</Text></View><Text style={active === 'payments' ? styles.activeNavLabel : styles.navLabel}>Payments</Text></Pressable>
-      <Pressable style={styles.navItem} onPress={onRemindersPress}><View style={active === 'reminders' ? styles.activeNavIcon : undefined}><ReminderNavIcon />{reminderCount > 0 ? <View style={styles.notificationBadge}><Text style={styles.notificationText}>{reminderCount}</Text></View> : null}</View><Text style={active === 'reminders' ? styles.activeNavLabel : styles.navLabel}>Reminders</Text></Pressable>
+    <View style={[styles.bottomNavigation, { paddingBottom: Math.max(insets.bottom, 10), height: 70 + insets.bottom }]}>
+      {navItems.map((item) => {
+        const isActive = active === item.key;
+        return (
+          <Pressable key={item.key} style={styles.navItem} onPress={item.onPress} accessibilityRole="button" accessibilityLabel={item.label} accessibilityState={{ selected: isActive }}>
+            <View style={[styles.navIconWrap, isActive && { backgroundColor: roleTheme.soft }]}>
+              {item.key === 'collect' ? (
+                <Text style={[styles.rupeeNavIcon, isActive && { color: roleTheme.primary }]}>₹</Text>
+              ) : (
+                <Feather name={item.icon} size={20} color={isActive ? roleTheme.primary : '#8D95A1'} />
+              )}
+              {item.key === 'reminders' && reminderCount > 0 ? (
+                <View style={styles.notificationBadge}><Text style={styles.notificationText}>{reminderCount > 99 ? '99+' : reminderCount}</Text></View>
+              ) : null}
+            </View>
+            <Text style={isActive ? styles.activeNavLabel : styles.navLabel}>{item.label}</Text>
+          </Pressable>
+        );
+      })}
     </View>
   );
 }
 
 function MemberBottomNavigation({ active, onHome, onRenew, onPayments, onUpdates }: { active: 'home' | 'renew' | 'payments' | 'updates'; onHome: () => void; onRenew: () => void; onPayments: () => void; onUpdates: () => void }) {
-  const item = (key: 'home' | 'renew' | 'payments' | 'updates', label: string, icon: string, onPress: () => void) => <Pressable style={styles.memberNavItem} onPress={onPress}><View style={active === key ? styles.memberNavActiveIcon : undefined}><Text style={[styles.memberNavIcon, active === key && styles.activeNavGlyph]}>{icon}</Text></View><Text style={active === key ? styles.activeNavLabel : styles.navLabel}>{label}</Text></Pressable>;
-  return <View style={styles.bottomNavigation}>{item('home', 'Home', '⌂', onHome)}{item('renew', 'Renew', '₹', onRenew)}{item('payments', 'Payments', '◴', onPayments)}{item('updates', 'Updates', '◌', onUpdates)}</View>;
+  const insets = useSafeAreaInsets();
+  const item = (key: 'home' | 'renew' | 'payments' | 'updates', label: string, icon: 'home' | 'refresh-cw' | 'clock' | 'bell', onPress: () => void) => {
+    const isActive = active === key;
+    return (
+      <Pressable style={styles.memberNavItem} onPress={onPress} accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected: isActive }}>
+        <View style={[styles.navIconWrap, isActive && styles.memberNavActiveIcon]}>
+          <Feather name={icon} size={20} color={isActive ? '#FFC83A' : '#8D95A1'} />
+        </View>
+        <Text style={isActive ? styles.activeNavLabel : styles.navLabel}>{label}</Text>
+      </Pressable>
+    );
+  };
+  return (
+    <View style={[styles.bottomNavigation, { paddingBottom: Math.max(insets.bottom, 10), height: 70 + insets.bottom }]}>
+      {item('home', 'Home', 'home', onHome)}
+      {item('renew', 'Renew', 'refresh-cw', onRenew)}
+      {item('payments', 'Payments', 'clock', onPayments)}
+      {item('updates', 'Updates', 'bell', onUpdates)}
+    </View>
+  );
 }
 
 function MemberAppHeader({ title, subtitle, name, onLogout }: { title: string; subtitle: string; name: string; onLogout?: () => void }) {
@@ -678,6 +917,7 @@ function MemberHomeScreen({ managementId, memberId, memberName, onRenew, onPayme
 
 function MemberRenewScreen({ managementId, memberId, onHome, onPayments, onUpdates }: { managementId: number; memberId: number; onHome: () => void; onPayments: () => void; onUpdates: () => void }) {
   const [member, setMember] = useState<MemberDetail | null>(null);
+  const roleTheme = useContext(RoleThemeContext);
   const [membershipPlans, setMembershipPlans] = useState<Plan[]>([]);
   const [trainingPlans, setTrainingPlans] = useState<Plan[]>([]);
   const [error, setError] = useState('');
@@ -720,8 +960,6 @@ function FutureDatePicker({ value, onChange }: { value: string; onChange: (value
   const insets = useSafeAreaInsets();
   const [open, setOpen] = useState(false);
   const [visibleMonth, setVisibleMonth] = useState(() => parseIsoDate(value));
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
   const monthStart = new Date(visibleMonth.getFullYear(), visibleMonth.getMonth(), 1);
   const firstDayOffset = (monthStart.getDay() + 6) % 7;
   const calendarStart = new Date(monthStart);
@@ -732,18 +970,17 @@ function FutureDatePicker({ value, onChange }: { value: string; onChange: (value
     return date;
   });
   const selectedDate = toIsoDate(parseIsoDate(value));
-  const isCurrentMonth = visibleMonth.getFullYear() === today.getFullYear() && visibleMonth.getMonth() === today.getMonth();
 
   return <View>
     <Pressable style={styles.dateField} onPress={() => setOpen(!open)}>
       <Text style={styles.dateFieldText}>{value}</Text><Text style={styles.inputSuffix}>▣</Text>
     </Pressable>
     {open ? <View style={styles.calendarPanel}>
-      <View style={styles.calendarHeader}><Pressable disabled={isCurrentMonth} onPress={() => setVisibleMonth(new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() - 1, 1))}><Text style={[styles.calendarArrow, isCurrentMonth && styles.calendarArrowDisabled]}>‹</Text></Pressable><Text style={styles.calendarMonth}>{visibleMonth.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })}</Text><Pressable onPress={() => setVisibleMonth(new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() + 1, 1))}><Text style={styles.calendarArrow}>›</Text></Pressable></View>
+      <View style={styles.calendarHeader}><Pressable onPress={() => setVisibleMonth(new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() - 1, 1))}><Text style={styles.calendarArrow}>‹</Text></Pressable><Text style={styles.calendarMonth}>{visibleMonth.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })}</Text><Pressable onPress={() => setVisibleMonth(new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() + 1, 1))}><Text style={styles.calendarArrow}>›</Text></Pressable></View>
       <View style={styles.calendarWeek}>{['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((day, index) => <Text key={`${day}-${index}`} style={styles.calendarWeekDay}>{day}</Text>)}</View>
       <View style={styles.calendarDays}>{days.map((date) => {
         const isoDate = toIsoDate(date);
-        const unavailable = date < today || date.getMonth() !== visibleMonth.getMonth();
+        const unavailable = date.getMonth() !== visibleMonth.getMonth();
         const selected = isoDate === selectedDate;
         return <Pressable key={isoDate} disabled={unavailable} onPress={() => { onChange(isoDate); setOpen(false); }} style={[styles.calendarDay, selected && styles.calendarDaySelected]}><Text style={[styles.calendarDayText, unavailable && styles.calendarDayUnavailable, selected && styles.calendarDayTextSelected]}>{date.getDate()}</Text></Pressable>;
       })}</View>
@@ -789,6 +1026,7 @@ function HomeScreen({ managementId, managementName, mobileNumber, actorRole, onM
   }, [managementId, refreshVersion]);
 
   const homeStyles = { ...styles, ...dashboardStyles };
+  const roleTheme = useContext(RoleThemeContext);
   const insets = useSafeAreaInsets();
   const now = new Date();
   const currentMemberCount = members.filter((member) => member.status === 'ACTIVE' || member.status === 'DUE_SOON').length;
@@ -812,12 +1050,13 @@ function HomeScreen({ managementId, managementName, mobileNumber, actorRole, onM
     }
   }
 
-  return <View style={homeStyles.screen}><StatusBar style="light" /><SafeAreaView style={homeStyles.safeArea} edges={['top', 'left', 'right']}><View style={homeStyles.membersPhoneFrame}>
-    <ScrollView style={homeStyles.homeScroll} contentContainerStyle={homeStyles.homeContent} showsVerticalScrollIndicator={false} refreshControl={<RefreshControl refreshing={loading} onRefresh={() => setRefreshVersion((v) => v + 1)} tintColor="#ECEEF1" colors={['#ECEEF1']} progressBackgroundColor="#1D2127" />}>
-      <View style={homeStyles.membersTitleRow}><View><Text style={homeStyles.homeGreeting}>Hi, {managementName}</Text><Text style={homeStyles.membersSubtitle}>Good {now.getHours() < 12 ? 'morning' : now.getHours() < 17 ? 'afternoon' : 'evening'} · {actorRole === 'TRAINER' ? 'Trainer' : 'Management'}</Text></View><Pressable style={homeStyles.profileCircle} onPress={() => setAccountOpen(true)} accessibilityLabel="Open account"><Text style={homeStyles.profileInitial}>{managementName[0]?.toUpperCase() ?? 'M'}</Text></Pressable></View>
+  return <ImageBackground source={require('../../assets/images/dashboard-bg.jpg')} style={homeStyles.screen} imageStyle={styles.dashboardBgImage}><View style={styles.dashboardBgScrim} /><StatusBar style="light" /><SafeAreaView style={homeStyles.safeArea} edges={['top', 'left', 'right']}><View style={[homeStyles.membersPhoneFrame, { backgroundColor: 'transparent' }]}>
+    <KeyboardAvoidingView style={homeStyles.safeArea} behavior="padding">
+    <ScrollView style={homeStyles.homeScroll} contentContainerStyle={homeStyles.homeContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} refreshControl={<RefreshControl refreshing={loading} onRefresh={() => setRefreshVersion((v) => v + 1)} tintColor="#ECEEF1" colors={['#ECEEF1']} progressBackgroundColor="#1D2127" />}>
+      <View style={homeStyles.membersTitleRow}><View><Text style={homeStyles.homeGreeting}>Hi, {managementName}</Text><Text style={homeStyles.membersSubtitle}>Good {now.getHours() < 12 ? 'morning' : now.getHours() < 17 ? 'afternoon' : 'evening'} · {actorRole === 'TRAINER' ? 'Trainer' : 'Management'}</Text></View><Pressable style={[homeStyles.profileCircle, { backgroundColor: roleTheme.primary }]} onPress={() => setAccountOpen(true)} accessibilityLabel="Open account"><Text style={[homeStyles.profileInitial, { color: roleTheme.onPrimary }]}>{managementName[0]?.toUpperCase() ?? 'M'}</Text></Pressable></View>
       <View style={homeStyles.homeSectionHeader}><Text style={homeStyles.homeDate}>{dateLabel}</Text><Pressable disabled={loading} onPress={() => setRefreshVersion((value) => value + 1)} accessibilityLabel="Refresh dashboard" hitSlop={12}><Feather name="refresh-cw" size={16} color="#8D95A1" /></Pressable></View>
       {loading ? <ActivityIndicator color="#ECEEF1" style={homeStyles.memberLoading} /> : null}
-      {error ? <Text style={homeStyles.error}>{error}</Text> : null}
+      <AlertBanner message={error} />
       {!loading && !error ? <>
         <View style={homeStyles.homeTiles}>
             <Pressable style={homeStyles.homeTile} onPress={() => onMembers('CURRENT')}><Text style={homeStyles.homeTileLabel}>Current members</Text><Text style={homeStyles.homeTileValue}>{currentMemberCount}</Text><Text style={homeStyles.homeTileSub}>of {counts.totalCount} · {counts.overdueCount} lapsed</Text></Pressable>
@@ -825,40 +1064,72 @@ function HomeScreen({ managementId, managementName, mobileNumber, actorRole, onM
             <Pressable style={homeStyles.homeTile} onPress={() => onMembers('OVERDUE')}><Text style={homeStyles.homeTileLabel}>Overdue</Text><Text style={[homeStyles.homeTileValue, homeStyles.homeTileValueOverdue]}>{counts.overdueCount}</Text><Text style={homeStyles.homeTileSub}>members</Text></Pressable>
         </View>
         <View style={homeStyles.homeSection}><View style={homeStyles.homeActionList}>
-          <Pressable style={homeStyles.homeAction} onPress={onOnboard}><View style={homeStyles.homeActionIcon}><Feather name="user-plus" size={23} color="#ECEEF1" /></View><View style={homeStyles.homeActionCopy}><Text style={homeStyles.homeActionTitle}>Onboard a member</Text><Text style={homeStyles.homeActionDescription}>Add member details and choose a plan</Text></View><Text style={homeStyles.homeActionArrow}>›</Text></Pressable>
-          <Pressable style={homeStyles.homeAction} onPress={onCollect}><View style={homeStyles.homeActionIcon}><Text style={homeStyles.homeActionGlyph}>₹</Text></View><View style={homeStyles.homeActionCopy}><Text style={homeStyles.homeActionTitle}>Collect payment</Text><Text style={homeStyles.homeActionDescription}>UPI with screenshot, or cash</Text></View><Text style={homeStyles.homeActionArrow}>›</Text></Pressable>
-          <Pressable style={homeStyles.homeAction} onPress={onReminders}><View style={homeStyles.homeActionIcon}><Feather name="bell" size={23} color="#ECEEF1" /></View><View style={homeStyles.homeActionCopy}><Text style={homeStyles.homeActionTitle}>Send payment reminders</Text><Text style={homeStyles.homeActionDescription}>{counts.dueSoonCount + counts.overdueCount} due or overdue members</Text></View><Text style={homeStyles.homeActionArrow}>›</Text></Pressable>
+          <Pressable style={homeStyles.homeAction} onPress={onOnboard}><View style={[homeStyles.homeActionIcon, { backgroundColor: roleTheme.soft, borderColor: roleTheme.border }]}><Feather name="user-plus" size={20} color={roleTheme.primary} /></View><View style={homeStyles.homeActionCopy}><Text style={homeStyles.homeActionTitle}>Onboard a member</Text><Text style={homeStyles.homeActionDescription}>Add member details and choose a plan</Text></View><Feather name="chevron-right" size={20} color="#6E7785" /></Pressable>
+          <Pressable style={homeStyles.homeAction} onPress={onCollect}><View style={[homeStyles.homeActionIcon, { backgroundColor: roleTheme.soft, borderColor: roleTheme.border }]}><Text style={[homeStyles.homeActionGlyph, { color: roleTheme.primary }]}>₹</Text></View><View style={homeStyles.homeActionCopy}><Text style={homeStyles.homeActionTitle}>Collect payment</Text><Text style={homeStyles.homeActionDescription}>UPI with screenshot, or cash</Text></View><Feather name="chevron-right" size={20} color="#6E7785" /></Pressable>
+          <Pressable style={[homeStyles.homeAction, { borderBottomWidth: 0 }]} onPress={onReminders}><View style={[homeStyles.homeActionIcon, { backgroundColor: roleTheme.soft, borderColor: roleTheme.border }]}><Feather name="bell" size={20} color={roleTheme.primary} /></View><View style={homeStyles.homeActionCopy}><Text style={homeStyles.homeActionTitle}>Send payment reminders</Text><Text style={homeStyles.homeActionDescription}>{counts.dueSoonCount + counts.overdueCount} due or overdue members</Text></View><Feather name="chevron-right" size={20} color="#6E7785" /></Pressable>
         </View></View>
-        <View style={homeStyles.homeSection}><View style={homeStyles.homeSectionHeader}><Text style={homeStyles.homeSectionTitle}>PAYMENT FOLLOW-UP</Text><Pressable onPress={onReminders}><Text style={homeStyles.homeLink}>Reminders</Text></Pressable></View><View style={homeStyles.followUpTabs}><Pressable onPress={() => setFollowUp('DUE_SOON')} style={[homeStyles.followUpTab, followUp === 'DUE_SOON' && homeStyles.followUpTabSelected]}><Text style={[homeStyles.followUpTabText, followUp === 'DUE_SOON' && homeStyles.followUpTabTextSelected]}>Due in 7 days</Text><View style={homeStyles.dueBadge}><Text style={homeStyles.dueBadgeText}>{counts.dueSoonCount}</Text></View></Pressable><Pressable onPress={() => setFollowUp('OVERDUE')} style={[homeStyles.followUpTab, followUp === 'OVERDUE' && homeStyles.followUpTabSelected]}><Text style={[homeStyles.followUpTabText, followUp === 'OVERDUE' && homeStyles.followUpTabTextSelected]}>Overdue members</Text><View style={homeStyles.overBadge}><Text style={homeStyles.overBadgeText}>{counts.overdueCount}</Text></View></Pressable></View>{followUpMembers.length === 0 ? <View style={homeStyles.homeEmpty}><Text style={homeStyles.emptyMembersText}>{followUp === 'DUE_SOON' ? 'No members are due in the next 7 days.' : 'No overdue members.'}</Text></View> : <View style={homeStyles.homeFollowList}>{followUpMembers.map((member) => <Pressable key={member.id} style={homeStyles.homeFollowRow} onPress={() => onMembers(followUp)}><View style={homeStyles.memberAvatar}><Text style={homeStyles.memberAvatarText}>{member.fullName.split(/\s+/).map((part) => part[0]).slice(0, 2).join('').toUpperCase()}</Text></View><View style={homeStyles.memberCopy}><Text style={homeStyles.memberName}>{member.fullName}</Text><Text style={[homeStyles.memberDetail, member.status === 'OVERDUE' && homeStyles.homeTileValueOverdue]}>{paymentStatusText(member)} · {member.membershipPlanName}</Text></View><Text style={homeStyles.homeFollowArrow}>›</Text></Pressable>)}</View>}</View>
-        <View style={[homeStyles.homeSection, { opacity: 0.45 }]}><Text style={homeStyles.homeSectionTitle}>Send an update · unavailable</Text><View style={homeStyles.broadcastCard}><Text style={homeStyles.broadcastLabel}>Message to all members on WhatsApp</Text><TextInput editable={false} value={broadcastText} onChangeText={(value) => { setBroadcastText(value); setBroadcastMessage(''); }} placeholder="e.g. The gym is closed on Sunday for floor maintenance." placeholderTextColor="#8D95A1" multiline style={homeStyles.broadcastInput} /><Pressable disabled accessibilityState={{ disabled: true }} onPress={() => void sendBroadcast()} style={[homeStyles.broadcastButton, (!broadcastText.trim() || broadcastSending) && homeStyles.disabledButton]}><Text style={homeStyles.broadcastButtonText}>{broadcastSending ? 'Preparing…' : `Send to ${counts.totalCount} ${counts.totalCount === 1 ? 'member' : 'members'}`}</Text></Pressable>{broadcastMessage ? <Text style={homeStyles.reminderConfirmation}>{broadcastMessage}</Text> : <Text style={homeStyles.broadcastHelp}>WhatsApp announcements are currently disabled.</Text>}</View></View>
+        <View style={homeStyles.homeSection}><View style={homeStyles.homeSectionHeader}><Text style={homeStyles.homeSectionTitle}>PAYMENT FOLLOW-UP</Text><Pressable onPress={onReminders}><Text style={[homeStyles.homeLink, { color: roleTheme.primary }]}>Reminders</Text></Pressable></View><View style={homeStyles.followUpTabs}><Pressable onPress={() => setFollowUp('DUE_SOON')} style={[homeStyles.followUpTab, followUp === 'DUE_SOON' && { borderBottomColor: roleTheme.primary }]}><Text style={[homeStyles.followUpTabText, followUp === 'DUE_SOON' && homeStyles.followUpTabTextSelected]}>Due in 7 days</Text><View style={homeStyles.dueBadge}><Text style={homeStyles.dueBadgeText}>{counts.dueSoonCount}</Text></View></Pressable><Pressable onPress={() => setFollowUp('OVERDUE')} style={[homeStyles.followUpTab, followUp === 'OVERDUE' && { borderBottomColor: roleTheme.primary }]}><Text style={[homeStyles.followUpTabText, followUp === 'OVERDUE' && homeStyles.followUpTabTextSelected]}>Overdue members</Text><View style={homeStyles.overBadge}><Text style={homeStyles.overBadgeText}>{counts.overdueCount}</Text></View></Pressable></View>{followUpMembers.length === 0 ? <View style={homeStyles.homeEmpty}><Text style={homeStyles.emptyMembersText}>{followUp === 'DUE_SOON' ? 'No members are due in the next 7 days.' : 'No overdue members.'}</Text></View> : <View style={homeStyles.homeFollowList}>{followUpMembers.map((member) => <Pressable key={member.id} style={homeStyles.homeFollowRow} onPress={() => onMembers(followUp)}><View style={homeStyles.memberAvatar}><Text style={homeStyles.memberAvatarText}>{member.fullName.split(/\s+/).map((part) => part[0]).slice(0, 2).join('').toUpperCase()}</Text></View><View style={homeStyles.memberCopy}><Text style={homeStyles.memberName}>{member.fullName}</Text><Text style={[homeStyles.memberDetail, member.status === 'OVERDUE' && homeStyles.homeTileValueOverdue]}>{paymentStatusText(member)} · {member.membershipPlanName}</Text></View><Feather name="chevron-right" size={20} color="#6E7785" /></Pressable>)}</View>}</View>
+        <View style={[homeStyles.homeSection, { opacity: 0.45 }]}><Text style={homeStyles.homeSectionTitle}>Send an update · unavailable</Text><View style={homeStyles.broadcastCard}><Text style={homeStyles.broadcastLabel}>Message to all members on WhatsApp</Text><TextInput editable={false} value={broadcastText} onChangeText={(value) => { setBroadcastText(value); setBroadcastMessage(''); }} placeholder="e.g. The gym is closed on Sunday for floor maintenance." placeholderTextColor="#6E7785" multiline style={homeStyles.broadcastInput} /><Pressable disabled accessibilityState={{ disabled: true }} onPress={() => void sendBroadcast()} style={[homeStyles.broadcastButton, (!broadcastText.trim() || broadcastSending) && homeStyles.disabledButton]}><Text style={homeStyles.broadcastButtonText}>{broadcastSending ? 'Preparing…' : `Send to ${counts.totalCount} ${counts.totalCount === 1 ? 'member' : 'members'}`}</Text></Pressable>{broadcastMessage ? <Text style={homeStyles.reminderConfirmation}>{broadcastMessage}</Text> : <Text style={homeStyles.broadcastHelp}>WhatsApp announcements are currently disabled.</Text>}</View></View>
       </> : null}
     </ScrollView>
-    <View style={[homeStyles.dashboardNav, { paddingBottom: Math.max(insets.bottom, 8) }]}>
-      {([
-        ['Home', 'home', () => {}, true],
-        ['Members', 'users', () => onMembers('ALL'), false],
-        ['Collect', 'dollar-sign', onCollect, false],
-        ['Payments', 'clock', onPayments, false],
-        ['Reminders', 'bell', onReminders, false],
-      ] as const).map(([label, icon, action, active]) => <Pressable key={label} accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected: active }} onPress={action} style={homeStyles.dashboardNavItem}>
-        <View style={[homeStyles.dashboardNavIcon, active && homeStyles.dashboardNavActive]}>
-          {label === 'Collect' ? <Text style={homeStyles.dashboardRupee}>₹</Text> : <Feather name={icon} size={25} color={active ? '#ECEEF1' : '#8D95A1'} />}
-          {label === 'Reminders' && counts.dueSoonCount + counts.overdueCount > 0 ? <View style={homeStyles.dashboardNavBadge}><Text style={homeStyles.dashboardNavBadgeText}>{counts.dueSoonCount + counts.overdueCount}</Text></View> : null}
-        </View>
-      </Pressable>)}
-    </View>
+    </KeyboardAvoidingView>
+    <BottomNavigation
+      managementId={managementId}
+      active="home"
+      onMembersPress={() => onMembers('ALL')}
+      onCollectPress={onCollect}
+      onPaymentsPress={onPayments}
+      onRemindersPress={onReminders}
+    />
     <AccountSheet visible={accountOpen} managementName={managementName} mobileNumber={mobileNumber} role={actorRole} onClose={() => setAccountOpen(false)} onLogout={onLogout} />
-  </View></SafeAreaView></View>;
+  </View></SafeAreaView></ImageBackground>;
 }
 
 function ProfileButton({ name }: { name: string }) {
   const openProfile = useContext(ProfileActionContext);
-  return <Pressable style={dashboardStyles.profileCircle} onPress={openProfile} accessibilityRole="button" accessibilityLabel="Open account"><Text style={dashboardStyles.profileInitial}>{name.trim()[0]?.toUpperCase() ?? 'M'}</Text></Pressable>;
+  const roleTheme = useContext(RoleThemeContext);
+  return <Pressable style={[dashboardStyles.profileCircle, { backgroundColor: roleTheme.primary }]} onPress={openProfile} accessibilityRole="button" accessibilityLabel="Open account"><Text style={[dashboardStyles.profileInitial, { color: roleTheme.onPrimary }]}>{name.trim()[0]?.toUpperCase() ?? 'M'}</Text></Pressable>;
 }
 
 function AccountSheet({ visible, managementName, mobileNumber, role, onClose, onLogout }: { visible: boolean; managementName: string; mobileNumber: string; role: AppRole; onClose: () => void; onLogout: () => void }) {
   const trainer = role === 'TRAINER';
-  return <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}><View style={styles.memberSheetModal}><Pressable style={styles.memberSheetBackdrop} onPress={onClose} /><View style={styles.accountSheet}><View style={styles.sheetHandle} /><View style={styles.sheetHeader}><View style={[styles.sheetAvatar, styles.accountAvatar]}><Text style={styles.profileInitial}>{managementName[0]?.toUpperCase() ?? 'M'}</Text></View><View style={styles.sheetMemberCopy}><Text style={styles.sheetMemberName}>{managementName}</Text><Text style={styles.sheetMemberPhone}>{trainer ? 'TRN' : 'MGMT'}-001 · +91 {mobileNumber}</Text></View><Pressable onPress={onClose} style={styles.sheetCloseButton} accessibilityLabel="Close account"><Text style={styles.sheetCloseText}>×</Text></Pressable></View><View style={styles.detailRows}><DetailRow label="Signed in with" value={trainer ? 'Trainer login (OTP)' : 'Center Management login'} /><DetailRow label="Role" value={trainer ? 'Trainer' : 'Management'} /><DetailRow label="Center" value="People Fitness" /><DetailRow label="Payments history" value={trainer ? 'Last 10 transactions' : 'Full access'} /></View><Pressable style={styles.accountLogoutButton} onPress={onLogout}><Text style={styles.accountLogoutText}>Log out</Text></Pressable></View></View></Modal>;
+  const roleTheme = getRoleTheme(role);
+  const insets = useSafeAreaInsets();
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose} statusBarTranslucent>
+      <View style={styles.memberSheetModal}>
+        <Pressable style={styles.memberSheetBackdrop} onPress={onClose} />
+        <View style={[styles.accountSheet, { paddingBottom: Math.max(insets.bottom, 24) + 16 }]}>
+          <View style={styles.sheetHandle} />
+          <View style={styles.sheetHeader}>
+            <View style={[styles.sheetAvatar, styles.accountAvatar, { backgroundColor: roleTheme.primary }]}>
+              <Text style={[styles.profileInitial, { color: roleTheme.onPrimary }]}>{managementName[0]?.toUpperCase() ?? 'M'}</Text>
+            </View>
+            <View style={styles.sheetMemberCopy}>
+              <Text style={styles.sheetMemberName}>{managementName}</Text>
+              <Text style={styles.sheetMemberPhone}>{trainer ? 'TRN' : 'MGMT'}-001 · +91 {mobileNumber}</Text>
+            </View>
+            <Pressable onPress={onClose} style={styles.sheetCloseButton} accessibilityLabel="Close account">
+              <Feather name="x" size={18} color="#F3F5F7" />
+            </Pressable>
+          </View>
+          <View style={styles.detailRows}>
+            <DetailRow label="Signed in with" value={trainer ? 'Trainer login (OTP)' : 'Center Management login'} />
+            <DetailRow label="Role" value={trainer ? 'Trainer' : 'Management'} />
+            <DetailRow label="Center" value="People Fitness" />
+            <DetailRow label="Payments history" value={trainer ? 'Last 10 transactions' : 'Full access'} />
+          </View>
+          <Pressable style={styles.accountLogoutButton} onPress={onLogout} accessibilityRole="button" accessibilityLabel="Log out">
+            <View style={styles.accountLogoutInner}>
+              <Feather name="log-out" size={16} color="#F87171" />
+              <Text style={styles.accountLogoutText}>Log out</Text>
+            </View>
+          </Pressable>
+          <PoweredByFooter withBottomInset={false} />
+        </View>
+      </View>
+    </Modal>
+  );
 }
 
 function PaymentsHistoryScreen({ managementId, limitedToRecent, actorName, onHome, onMembers, onCollect, onReminders }: { managementId: number; limitedToRecent: boolean; actorName: string; onHome: () => void; onMembers: () => void; onCollect: () => void; onReminders: () => void }) {
@@ -1052,6 +1323,7 @@ function MembersScreen({ initialFilter, managementId, actorRole, actorName, onHo
     { key: 'ACTIVE' as const, label: `Active ${counts.activeCount}` },
   ];
   const normalizedSearch = search.trim().toLowerCase();
+  const roleTheme = useContext(RoleThemeContext);
   const visibleMembers = members.filter((member) =>
     (selectedFilter === 'ALL' || (selectedFilter === 'CURRENT' ? member.status === 'ACTIVE' || member.status === 'DUE_SOON' : selectedFilter === 'DUE_SOON' ? member.status === 'DUE_SOON' || member.status === 'PENDING' : member.status === selectedFilter))
     && (!normalizedSearch || member.fullName.toLowerCase().includes(normalizedSearch) || member.whatsappNumber.includes(normalizedSearch)));
@@ -1081,18 +1353,18 @@ function MembersScreen({ initialFilter, managementId, actorRole, actorName, onHo
               <View><Text style={styles.membersTitle}>Members</Text><Text style={styles.membersSubtitle}>{counts.totalCount} members · People Fitness</Text></View>
               <ProfileButton name={actorName} />
             </View>
-            <View style={styles.searchBox}><Text style={styles.searchIcon}>⌕</Text><TextInput value={search} onChangeText={setSearch} placeholder="Search name or number" placeholderTextColor="#8D95A1" style={styles.membersSearchInput} /></View>
+            <View style={styles.searchBox}><Feather name="search" size={18} color="#6E7785" /><TextInput value={search} onChangeText={setSearch} placeholder="Search name or number" placeholderTextColor="#6E7785" style={styles.membersSearchInput} /></View>
             <ScrollView horizontal style={styles.membersFilterBar} showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
               {filters.map((filter) => (
-                <Pressable key={filter.key} onPress={() => setSelectedFilter(filter.key)} style={[styles.filterChip, selectedFilter === filter.key && styles.filterChipSelected]}>
-                  <Text style={[styles.filterText, selectedFilter === filter.key && styles.filterTextSelected]}>{filter.label}</Text>
+                <Pressable key={filter.key} onPress={() => setSelectedFilter(filter.key)} style={[styles.filterChip, selectedFilter === filter.key && { backgroundColor: roleTheme.soft, borderColor: roleTheme.primary }]}>
+                  <Text style={[styles.filterText, selectedFilter === filter.key && { color: roleTheme.primary }]}>{filter.label}</Text>
                 </Pressable>
               ))}
             </ScrollView>
             <ScrollView style={styles.membersList} contentContainerStyle={styles.membersListContent} showsVerticalScrollIndicator={false}>
               <View style={styles.memberRows}>
               {loading ? <ActivityIndicator color="#ECEEF1" style={styles.memberLoading} /> : null}
-              {loadError ? <Text style={styles.error}>{loadError}</Text> : null}
+              <AlertBanner message={loadError} />
               {!loading && !loadError && visibleMembers.length === 0 ? <Text style={styles.emptyMembersText}>No members found.</Text> : null}
               {visibleMembers.map((member) => {
                 const dueSoon = member.status === 'DUE_SOON';
@@ -1107,8 +1379,8 @@ function MembersScreen({ initialFilter, managementId, actorRole, actorName, onHo
               })}
               </View>
             </ScrollView>
-            <Pressable style={styles.onboardButton} onPress={onOnboard} accessibilityLabel="Onboard member">
-              <Text style={styles.onboardPlus}>＋</Text><Text style={styles.onboardText}>Onboard</Text>
+            <Pressable style={[styles.onboardButton, { backgroundColor: roleTheme.primary }]} onPress={onOnboard} accessibilityLabel="Onboard member">
+              <Feather name="plus" size={20} color={roleTheme.onPrimary} /><Text style={[styles.onboardText, { color: roleTheme.onPrimary }]}>Onboard</Text>
             </Pressable>
           </View>
           <BottomNavigation managementId={managementId} onHomePress={onHome} onCollectPress={onCollectFromNav} onPaymentsPress={onPayments} onRemindersPress={onReminders} />
@@ -1282,6 +1554,7 @@ function CollectPaymentScreen({ managementId, actorName, actorRole, memberId, on
   const [selectedMemberId, setSelectedMemberId] = useState<number | null>(memberId);
   const [member, setMember] = useState<MemberDetail | null>(null);
   const [members, setMembers] = useState<MemberListItem[]>([]);
+  const roleTheme = useContext(RoleThemeContext);
   const [membershipPlans, setMembershipPlans] = useState<Plan[]>([]);
   const [trainingPlans, setTrainingPlans] = useState<Plan[]>([]);
   const [membershipPlanId, setMembershipPlanId] = useState<number | null>(null);
@@ -1291,6 +1564,8 @@ function CollectPaymentScreen({ managementId, actorName, actorRole, memberId, on
   const [utr, setUtr] = useState('');
   const [screenshotUri, setScreenshotUri] = useState<string | null>(null);
   const [screenshotData, setScreenshotData] = useState<string | null>(null);
+  const [readingUtr, setReadingUtr] = useState(false);
+  const [ocrNote, setOcrNote] = useState('');
   const [sendReceipt, setSendReceipt] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -1358,11 +1633,55 @@ function CollectPaymentScreen({ managementId, actorName, actorRole, memberId, on
 
   async function attachScreenshot() {
     setError('');
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsEditing: false, quality: 0.7, base64: true });
-    if (!result.canceled) {
-      const asset = result.assets[0];
-      setScreenshotUri(asset?.uri ?? null);
-      setScreenshotData(asset?.base64 ? `data:${asset.mimeType ?? 'image/jpeg'};base64,${asset.base64}` : null);
+    setOcrNote('');
+
+    let result: ImagePicker.ImagePickerResult;
+    if (Platform.OS === 'web') {
+      result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsEditing: false, quality: 0.85, base64: true });
+    } else {
+      const permission = await ImagePicker.requestCameraPermissionsAsync();
+      if (!permission.granted) {
+        setError('Allow camera access to take a photo of the UPI receipt.');
+        return;
+      }
+      result = await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], allowsEditing: false, quality: 1, base64: true });
+    }
+
+    if (result.canceled) return;
+    const asset = result.assets[0];
+    const uri = asset?.uri ?? null;
+    setScreenshotUri(uri);
+    setScreenshotData(asset?.base64 ? `data:${asset.mimeType ?? 'image/jpeg'};base64,${asset.base64}` : null);
+
+    if (uri && Platform.OS !== 'web') {
+      setReadingUtr(true);
+      try {
+        if (typeof TextRecognition?.recognize !== 'function') {
+          setOcrNote('Receipt OCR needs a fresh native app build to activate.');
+        } else {
+          const recognized = await TextRecognition.recognize(uri);
+          const blockLines = (recognized?.blocks ?? []).flatMap((block) => (block.lines ?? []).map((line) => line.text)).join('\n');
+          const blockText = (recognized?.blocks ?? []).map((block) => block.text).join('\n');
+          const extractedUtr =
+            extractUpiUtrFromText(recognized?.text ?? '') ??
+            extractUpiUtrFromText(blockLines) ??
+            extractUpiUtrFromText(blockText);
+          if (extractedUtr) {
+            setUtr(extractedUtr);
+            setOcrNote('');
+          } else {
+            const preview = (recognized?.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 60);
+            setOcrNote(preview ? `Could not detect Transaction ID (read: "${preview}…"). Please enter below.` : 'Could not read text from photo. Hold steady and try again, or enter Transaction ID below.');
+          }
+        }
+      } catch (ocrError) {
+        const msg = ocrError instanceof Error ? ocrError.message : '';
+        setOcrNote(msg.includes('null') || msg.includes('TextRecognition')
+          ? 'Receipt OCR needs a fresh native app build to activate.'
+          : 'Could not read receipt text. Please enter the Transaction ID below.');
+      } finally {
+        setReadingUtr(false);
+      }
     }
   }
 
@@ -1379,7 +1698,7 @@ function CollectPaymentScreen({ managementId, actorName, actorRole, memberId, on
     const paidAmount = Number(amount.replace(/[^0-9.]/g, ''));
     if (!Number.isFinite(paidAmount) || paidAmount <= 0) { setError('Enter the amount received.'); return; }
     if (paymentMode === 'UPI' && (!screenshotUri || !screenshotData)) { setError('Attach the UPI payment screenshot before saving.'); return; }
-    if (paymentMode === 'UPI' && utr && !/^\d{12}$/.test(utr)) { setError('The UTR should be exactly 12 digits.'); return; }
+    if (paymentMode === 'UPI' && utr.trim() && !/^[a-zA-Z0-9/_-]{6,}$/.test(utr.trim())) { setError('Transaction ID should be at least 6 alphanumeric characters.'); return; }
     setSaving(true);
     setError('');
     try {
@@ -1437,8 +1756,8 @@ function CollectPaymentScreen({ managementId, actorName, actorRole, memberId, on
 
   if (saved) {
     return <View style={styles.screen}><SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}><View style={styles.collectScreen}>
-      <View style={styles.onboardHeader}><Pressable onPress={onSaved}><Text style={styles.backIcon}>‹</Text></Pressable><View style={styles.onboardHeading}><Text style={styles.onboardTitle}>Payment saved</Text><Text style={styles.onboardSubtitle}>People Fitness</Text></View></View>
-      <View style={styles.paymentSuccess}><View style={styles.successBadge}><Text style={styles.successIcon}>✓</Text></View><Text style={styles.paymentSuccessTitle}>Payment saved</Text><Text style={styles.paymentSuccessText}>₹{saved.amount.toLocaleString('en-IN')} from {member?.fullName} by {saved.paymentMode}.</Text><Text style={styles.paymentSuccessText}>Membership valid till {parseIsoDate(saved.validTill).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}.</Text><Pressable style={styles.completeOnboardButton} onPress={chooseAnotherMember}><Text style={styles.primaryButtonText}>Collect another payment</Text></Pressable><Pressable style={styles.sampleScreenshotButton} onPress={onPayments}><Text style={styles.sampleScreenshotText}>View payment history</Text></Pressable></View>
+      <View style={styles.onboardHeader}><Pressable onPress={onSaved} hitSlop={12} style={styles.backIconBtn}><Feather name="chevron-left" size={24} color="#F3F5F7" /></Pressable><View style={styles.onboardHeading}><Text style={styles.onboardTitle}>Payment saved</Text><Text style={styles.onboardSubtitle}>People Fitness</Text></View></View>
+      <View style={styles.paymentSuccess}><View style={styles.successBadge}><Feather name="check" size={28} color="#34D399" /></View><Text style={styles.paymentSuccessTitle}>Payment saved</Text><Text style={styles.paymentSuccessText}>₹{saved.amount.toLocaleString('en-IN')} from {member?.fullName} by {saved.paymentMode}.</Text><Text style={styles.paymentSuccessText}>Membership valid till {parseIsoDate(saved.validTill).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}.</Text><Pressable style={[styles.completeOnboardButton, { backgroundColor: roleTheme.primary }]} onPress={chooseAnotherMember}><Text style={[styles.primaryButtonText, { color: roleTheme.onPrimary }]}>Collect another payment</Text></Pressable><Pressable style={styles.sampleScreenshotButton} onPress={onPayments}><Text style={styles.sampleScreenshotText}>View payment history</Text></Pressable></View>
       <BottomNavigation managementId={managementId} active="collect" onHomePress={onHome} onMembersPress={onSaved} onCollectPress={chooseAnotherMember} onPaymentsPress={onPayments} onRemindersPress={onReminders} />
     </View></SafeAreaView></View>;
   }
@@ -1446,26 +1765,29 @@ function CollectPaymentScreen({ managementId, actorName, actorRole, memberId, on
   return <View style={styles.screen}><SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}><View style={styles.collectScreen}>
     {Platform.OS !== 'web' ? <PhoneStatusBar /> : null}
     <View style={styles.screenHeader}><View><Text style={styles.membersTitle}>Collect payment</Text><Text style={styles.membersSubtitle}>Capture UPI screenshot</Text></View><ProfileButton name={actorName} /></View>
+    <KeyboardAvoidingView style={styles.safeArea} behavior="padding">
     <ScrollView style={styles.onboardScroll} contentContainerStyle={styles.onboardContent} keyboardShouldPersistTaps="handled">
       {loading ? <ActivityIndicator color="#ECEEF1" style={styles.memberLoading} /> : null}
-      {error ? <Text style={styles.error}>{error}</Text> : null}
+      <AlertBanner message={error} />
       {!loading && !error ? <><Text style={styles.formLabel}>Member</Text><DropdownField value={selectedMemberId} placeholder="Choose a member" options={memberOptions} onSelect={(value) => selectMember(Number(value))} accessibilityLabel="Member" />{member ? <Text style={styles.collectMemberHint}>{member.membershipPlanName} · {paymentStatusText(member)}</Text> : null}</> : null}
       {!loading && !error && !member ? <View style={styles.collectEmptyState}><Text style={styles.collectEmptyText}>Choose a member to record their payment.{`\n`}Newest members are listed first.</Text></View> : null}
       {member ? <>
         <View style={styles.twoColumnRow}><View style={styles.columnField}><Text style={styles.formLabel}>Membership plan</Text><DropdownField value={membershipPlanId} placeholder="Choose a plan" options={membershipOptions} onSelect={(value) => setMembershipPlanId(Number(value))} accessibilityLabel="Membership plan" /></View><View style={styles.columnField}><Text style={styles.formLabel}>Personal training</Text><DropdownField value={trainingPlanId ?? 'none'} placeholder="None" options={trainingOptions} onSelect={(value) => setTrainingPlanId(value === 'none' ? null : Number(value))} accessibilityLabel="Personal training" /></View></View>
-        <View style={styles.paymentSummary}><View style={styles.summaryLine}><Text style={styles.summaryLabel}>Membership · {selectedMembership?.name}</Text><Text style={styles.summaryValue}>₹{(selectedMembership?.amount ?? 0).toLocaleString('en-IN')}</Text></View>{selectedTraining ? <View style={[styles.summaryLine, styles.collectSummaryExtra]}><Text style={styles.summaryLabel}>Personal training · {selectedTraining.name}</Text><Text style={styles.summaryValue}>₹{selectedTraining.amount.toLocaleString('en-IN')}</Text></View> : null}<View style={styles.summaryDivider} /><View style={styles.summaryLine}><Text style={styles.firstPayment}>Total due</Text><Text style={styles.firstPaymentAmount}>₹{total.toLocaleString('en-IN')}</Text></View></View>
-        <View style={styles.twoColumnRow}><View style={styles.columnField}><Text style={styles.formLabel}>Amount (₹)</Text><TextInput value={amount} onChangeText={(value) => setAmount(value.replace(/[^0-9.]/g, ''))} keyboardType="decimal-pad" style={styles.formInput} /></View><View style={styles.columnField}><Text style={styles.formLabel}>Paid by</Text><View style={styles.paymentModeRow}><Pressable onPress={() => setPaymentMode('UPI')} style={[styles.paymentModeButton, paymentMode === 'UPI' && styles.paymentModeButtonSelected]}><Text style={[styles.paymentModeButtonText, paymentMode === 'UPI' && styles.paymentModeButtonTextSelected]}>UPI</Text></Pressable><Pressable onPress={() => { setPaymentMode('CASH'); setUtr(''); setScreenshotUri(null); setScreenshotData(null); }} style={[styles.paymentModeButton, paymentMode === 'CASH' && styles.paymentModeButtonSelected]}><Text style={[styles.paymentModeButtonText, paymentMode === 'CASH' && styles.paymentModeButtonTextSelected]}>Cash</Text></Pressable></View></View></View>
-        {paymentMode === 'UPI' ? <><Text style={styles.formLabel}>UPI payment screenshot</Text><View style={styles.screenshotCard}>{screenshotUri ? <><Image source={{ uri: screenshotUri }} style={styles.screenshotPreview} /><View style={styles.screenshotCopy}><Text style={styles.screenshotAttachedText}>✓ Screenshot attached</Text><View style={styles.screenshotButtonRow}><Pressable onPress={() => void attachScreenshot()}><Text style={styles.replaceScreenshotText}>Replace</Text></Pressable><Pressable onPress={() => { setScreenshotUri(null); setScreenshotData(null); }}><Text style={styles.replaceScreenshotText}>Remove</Text></Pressable></View></View></> : <><Text style={styles.screenshotIcon}>▧</Text><Text style={styles.screenshotHint}>Attach the payment screenshot the member{`\n`}shows or sends you.</Text><View style={styles.screenshotButtonRow}><Pressable style={styles.attachScreenshotButton} onPress={() => void attachScreenshot()}><Text style={styles.attachScreenshotText}>⇧ Upload screenshot</Text></Pressable><Pressable style={styles.sampleScreenshotButton} onPress={useSampleScreenshot}><Text style={styles.sampleScreenshotText}>Use sample</Text></Pressable></View></>}</View><Text style={styles.formLabel}>UPI reference number (UTR)</Text><TextInput value={utr} onChangeText={(value) => setUtr(value.replace(/\D/g, '').slice(0, 12))} keyboardType="number-pad" placeholder="12 digits, shown on the screenshot" placeholderTextColor="#8D95A1" style={styles.formInput} /><Text style={styles.fieldNote}>Optional. Helps match the payment to the bank statement.</Text></> : null}
+        <View style={styles.paymentSummary}><View style={styles.summaryLine}><Text style={styles.summaryLabel}>Membership · {selectedMembership?.name}</Text><Text style={styles.summaryValue}>₹{(selectedMembership?.amount ?? 0).toLocaleString('en-IN')}</Text></View>{selectedTraining ? <View style={[styles.summaryLine, styles.collectSummaryExtra]}><Text style={styles.summaryLabel}>Personal training · {selectedTraining.name}</Text><Text style={styles.summaryValue}>₹{selectedTraining.amount.toLocaleString('en-IN')}</Text></View> : null}<View style={styles.summaryDivider} /><View style={styles.summaryLine}><Text style={styles.firstPayment}>Total due</Text><Text style={[styles.firstPaymentAmount, { color: roleTheme.primary }]}>₹{total.toLocaleString('en-IN')}</Text></View></View>
+        <View style={styles.twoColumnRow}><View style={styles.columnField}><Text style={styles.formLabel}>Amount (₹)</Text><TextInput value={amount} onChangeText={(value) => setAmount(value.replace(/[^0-9.]/g, ''))} keyboardType="decimal-pad" style={styles.formInput} /></View><View style={styles.columnField}><Text style={styles.formLabel}>Paid by</Text><View style={styles.paymentModeRow}><Pressable onPress={() => setPaymentMode('UPI')} style={[styles.paymentModeButton, paymentMode === 'UPI' && { backgroundColor: roleTheme.soft, borderWidth: 1, borderColor: roleTheme.border }]}><Text style={[styles.paymentModeButtonText, paymentMode === 'UPI' && { color: roleTheme.primary, fontWeight: '800' }]}>UPI</Text></Pressable><Pressable onPress={() => { setPaymentMode('CASH'); setUtr(''); setScreenshotUri(null); setScreenshotData(null); }} style={[styles.paymentModeButton, paymentMode === 'CASH' && { backgroundColor: roleTheme.soft, borderWidth: 1, borderColor: roleTheme.border }]}><Text style={[styles.paymentModeButtonText, paymentMode === 'CASH' && { color: roleTheme.primary, fontWeight: '800' }]}>Cash</Text></Pressable></View></View></View>
+        {paymentMode === 'UPI' ? <><Text style={styles.formLabel}>UPI payment screenshot</Text><View style={styles.screenshotCard}>{screenshotUri ? <><Image source={{ uri: screenshotUri }} style={styles.screenshotPreview} /><View style={styles.screenshotCopy}><Text style={styles.screenshotAttachedText}>{readingUtr ? 'Reading Transaction ID…' : '✓ Receipt photo attached'}</Text>{ocrNote ? <Text style={styles.fieldNote}>{ocrNote}</Text> : null}<View style={styles.screenshotButtonRow}><Pressable onPress={() => void attachScreenshot()} disabled={readingUtr}><Text style={styles.replaceScreenshotText}>Retake</Text></Pressable><Pressable onPress={() => { setScreenshotUri(null); setScreenshotData(null); setOcrNote(''); }}><Text style={styles.replaceScreenshotText}>Remove</Text></Pressable></View></View></> : <><View style={styles.screenshotIconWrap}><Feather name="camera" size={24} color="#9BA3B0" /></View><Text style={styles.screenshotHint}>Take a photo of the PhonePe or Google Pay{`\n`}receipt to auto-fill the Transaction ID.</Text><View style={styles.screenshotButtonRow}><Pressable style={styles.attachScreenshotButton} onPress={() => void attachScreenshot()}><Feather name="camera" size={14} color="#F3F5F7" /><Text style={styles.attachScreenshotText}>Take receipt photo</Text></Pressable><Pressable style={styles.sampleScreenshotButton} onPress={useSampleScreenshot}><Text style={styles.sampleScreenshotText}>Use sample</Text></Pressable></View></>}</View><Text style={styles.formLabel}>Transaction ID</Text><TextInput value={utr} onChangeText={(value) => setUtr(value.replace(/\s+/g, ''))} autoCapitalize="none" autoCorrect={false} placeholder="Shown on PhonePe / Google Pay receipt" placeholderTextColor="#6E7785" style={styles.formInput} /></> : null}
         <View style={styles.paymentValidity}><Text style={styles.paymentValidityLabel}>Membership validity</Text><Text style={styles.paymentValidityValue}>Valid till {selectedMembership ? (() => { const end = new Date(); end.setMonth(end.getMonth() + selectedMembership.durationMonths); return end.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }); })() : ''}</Text>{selectedTraining ? <Text style={styles.paymentValidityValue}>Personal training valid till {(() => { const end = new Date(); end.setMonth(end.getMonth() + selectedTraining.durationMonths); return end.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }); })()}</Text> : null}</View>
         <Pressable disabled accessibilityState={{ disabled: true }} style={[styles.welcomeMessageRow, styles.disabledButton]} onPress={() => setSendReceipt(!sendReceipt)}><View style={[styles.welcomeToggle, !sendReceipt && styles.welcomeToggleInactive]}><View style={[styles.welcomeToggleThumb, !sendReceipt && styles.welcomeToggleThumbInactive]} /></View><View><Text style={styles.welcomeMessageText}>Send receipt on WhatsApp · unavailable</Text>{!member.sendWhatsappWelcome ? <Text style={styles.fieldNote}>This member has turned WhatsApp updates off.</Text> : null}</View></Pressable>
-        <Pressable style={[styles.completeOnboardButton, saving && styles.disabledButton]} onPress={() => void savePayment()} disabled={saving}>{saving ? <ActivityIndicator color="#1A2028" /> : <Text style={styles.primaryButtonText}>Save payment · ₹{Number(amount || 0).toLocaleString('en-IN')}</Text>}</Pressable>
+        <Pressable style={[styles.completeOnboardButton, { backgroundColor: roleTheme.primary }, saving && styles.disabledButton]} onPress={() => void savePayment()} disabled={saving}>{saving ? <ActivityIndicator color={roleTheme.onPrimary} /> : <Text style={[styles.primaryButtonText, { color: roleTheme.onPrimary }]}>Save payment · ₹{Number(amount || 0).toLocaleString('en-IN')}</Text>}</Pressable>
       </> : null}
     </ScrollView>
+    </KeyboardAvoidingView>
     <BottomNavigation managementId={managementId} active="collect" onHomePress={onHome} onMembersPress={onBack} onCollectPress={chooseAnotherMember} onPaymentsPress={onPayments} onRemindersPress={onReminders} />
   </View></SafeAreaView></View>;
 }
 
 function OnboardMemberScreen({ managementId, actorName, actorRole, onBack, onSaved, onHome, onCollect, onPayments, onReminders }: { managementId: number; actorName: string; actorRole: AppRole; onBack: () => void; onSaved: () => void; onHome: () => void; onCollect: (memberId?: number) => void; onPayments: () => void; onReminders: () => void }) {
+  const roleTheme = useContext(RoleThemeContext);
   const [membershipPlans, setMembershipPlans] = useState<Plan[]>([]);
   const [personalTrainingPlans, setPersonalTrainingPlans] = useState<Plan[]>([]);
   const [membershipPlanId, setMembershipPlanId] = useState<number | null>(null);
@@ -1582,10 +1904,6 @@ function OnboardMemberScreen({ managementId, actorName, actorRole, onBack, onSav
   }
 
   async function addMember() {
-    if (!memberPhotoData) {
-      setFormError('Add a member photo before continuing.');
-      return;
-    }
     if (fullName.trim().length < 2 || !/^[6-9]\d{9}$/.test(whatsappNumber.replace(/\D/g, '')) || !membershipPlanId || !startDate || !selectedTrainer) {
       setFormError('Enter full name, a 10-digit WhatsApp number, a membership plan, start date, and trainer.');
       return;
@@ -1647,8 +1965,8 @@ function OnboardMemberScreen({ managementId, actorName, actorRole, onBack, onSav
 
   if (createdMember) {
     return <View style={styles.screen}><SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}><View style={styles.collectScreen}>
-      <View style={styles.onboardHeader}><Pressable onPress={onSaved}><Text style={styles.backIcon}>‹</Text></Pressable><View style={styles.onboardHeading}><Text style={styles.onboardTitle}>Member added</Text><Text style={styles.onboardSubtitle}>First payment pending</Text></View><ProfileButton name={actorName} /></View>
-      <View style={styles.paymentSuccess}><View style={styles.successBadge}><Text style={styles.successIcon}>✓</Text></View><Text style={styles.paymentSuccessTitle}>{firstName(fullName)} is ready to join</Text><Text style={styles.paymentSuccessText}>Their first payment of {currency(firstPayment)} is pending. Collect it to activate the {selectedPlan?.name ?? 'membership'} plan.</Text>{successMessage ? <Text style={styles.successMessage}>{successMessage}</Text> : null}<Pressable style={styles.completeOnboardButton} onPress={() => onCollect(createdMember.memberId)}><Text style={styles.primaryButtonText}>₹ &nbsp;Collect payment</Text></Pressable><Pressable style={styles.sampleScreenshotButton} onPress={() => { setCreatedMember(null); setFullName(''); setWhatsappNumber(''); removePhoto(); setMoreDetailsOpen(false); setSuccessMessage(''); }}><Text style={styles.sampleScreenshotText}>Add another member</Text></Pressable><Pressable style={styles.changeNumberButton} onPress={onSaved}><Text style={styles.changeNumberText}>View members</Text></Pressable></View>
+      <View style={styles.onboardHeader}><Pressable onPress={onSaved} hitSlop={12} style={styles.backIconBtn}><Feather name="chevron-left" size={24} color="#F3F5F7" /></Pressable><View style={styles.onboardHeading}><Text style={styles.onboardTitle}>Member added</Text><Text style={styles.onboardSubtitle}>First payment pending</Text></View><ProfileButton name={actorName} /></View>
+      <View style={styles.paymentSuccess}><View style={styles.successBadge}><Feather name="check" size={28} color="#34D399" /></View><Text style={styles.paymentSuccessTitle}>{firstName(fullName)} is ready to join</Text><Text style={styles.paymentSuccessText}>Their first payment of {currency(firstPayment)} is pending. Collect it to activate the {selectedPlan?.name ?? 'membership'} plan.</Text>{successMessage ? <Text style={styles.successMessage}>{successMessage}</Text> : null}<Pressable style={styles.completeOnboardButton} onPress={() => onCollect(createdMember.memberId)}><Text style={styles.primaryButtonText}>₹  Collect payment</Text></Pressable><Pressable style={styles.sampleScreenshotButton} onPress={() => { setCreatedMember(null); setFullName(''); setWhatsappNumber(''); removePhoto(); setMoreDetailsOpen(false); setSuccessMessage(''); }}><Text style={styles.sampleScreenshotText}>Add another member</Text></Pressable><Pressable style={styles.changeNumberButton} onPress={onSaved}><Text style={styles.changeNumberText}>View members</Text></Pressable></View>
       <BottomNavigation managementId={managementId} active="members" onHomePress={onHome} onMembersPress={onSaved} onCollectPress={() => onCollect(createdMember.memberId)} onPaymentsPress={onPayments} onRemindersPress={onReminders} />
     </View></SafeAreaView></View>;
   }
@@ -1659,19 +1977,20 @@ function OnboardMemberScreen({ managementId, actorName, actorRole, onBack, onSav
         <View style={styles.membersPhoneFrame}>
           {Platform.OS !== 'web' ? <PhoneStatusBar /> : null}
           <View style={styles.onboardHeader}>
-            <Pressable onPress={onBack} hitSlop={12}><Text style={styles.backIcon}>‹</Text></Pressable>
+            <Pressable onPress={onBack} hitSlop={12} style={styles.backIconBtn}><Feather name="chevron-left" size={24} color="#F3F5F7" /></Pressable>
             <View style={styles.onboardHeading}><Text style={styles.onboardTitle}>Onboard member</Text><Text style={styles.onboardSubtitle}>{actorRole === 'TRAINER' ? 'Trainer' : 'Management'} · People Fitness</Text></View>
             <ProfileButton name={actorName} />
           </View>
-          <ScrollView style={styles.onboardScroll} contentContainerStyle={styles.onboardContent} showsVerticalScrollIndicator={false}>
+          <KeyboardAvoidingView style={styles.safeArea} behavior="padding">
+          <ScrollView style={styles.onboardScroll} contentContainerStyle={styles.onboardContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
             <View style={styles.photoCard}>
               <View style={[styles.photoCircle, (memberPhotoUri || usingSamplePhoto) && styles.photoCircleFilled]}>
-                {memberPhotoUri ? <Image source={{ uri: memberPhotoUri }} style={styles.memberPhotoPreview} accessibilityLabel="Member photo preview" /> : usingSamplePhoto ? <View style={styles.samplePhotoPreview}><View style={styles.samplePhotoHead} /><View style={styles.samplePhotoBody} /><Text style={styles.samplePhotoLabel}>SAMPLE</Text></View> : <Text style={styles.cameraIcon}>▣</Text>}
+                {memberPhotoUri ? <Image source={{ uri: memberPhotoUri }} style={styles.memberPhotoPreview} accessibilityLabel="Member photo preview" /> : usingSamplePhoto ? <View style={styles.samplePhotoPreview}><View style={styles.samplePhotoHead} /><View style={styles.samplePhotoBody} /><Text style={styles.samplePhotoLabel}>SAMPLE</Text></View> : <Feather name="camera" size={26} color="#6E7785" />}
               </View>
               <View style={styles.photoRight}>
                 <Text style={styles.photoLabel}>Member photo</Text>
                 <Text style={styles.photoCopy}>{memberPhotoUri || usingSamplePhoto ? 'Photo added. It will show on the member card.' : 'Take a clear photo of the member’s face for their card and check-ins.'}</Text>
-                {memberPhotoUri || usingSamplePhoto ? <View style={styles.photoButtonRow}><Pressable style={styles.takePhotoButton} onPress={takePhoto}><Text style={styles.takePhotoText}>▣  Retake</Text></Pressable><Pressable style={styles.sampleButton} onPress={removePhoto}><Text style={styles.sampleButtonText}>Remove</Text></Pressable></View> : <View style={styles.photoButtonRow}><Pressable style={styles.takePhotoButton} onPress={takePhoto}><Text style={styles.takePhotoText}>▣  Take photo</Text></Pressable><Pressable style={styles.sampleButton} onPress={useSamplePhoto}><Text style={styles.sampleButtonText}>Use sample</Text></Pressable></View>}
+                {memberPhotoUri || usingSamplePhoto ? <View style={styles.photoButtonRow}><Pressable style={styles.takePhotoButton} onPress={takePhoto}><Feather name="camera" size={14} color="#F3F5F7" /><Text style={styles.takePhotoText}>Retake</Text></Pressable><Pressable style={styles.sampleButton} onPress={removePhoto}><Text style={styles.sampleButtonText}>Remove</Text></Pressable></View> : <View style={styles.photoButtonRow}><Pressable style={styles.takePhotoButton} onPress={takePhoto}><Feather name="camera" size={14} color="#F3F5F7" /><Text style={styles.takePhotoText}>Take photo</Text></Pressable><Pressable style={styles.sampleButton} onPress={useSamplePhoto}><Text style={styles.sampleButtonText}>Use sample</Text></Pressable></View>}
                 {photoError ? <Text style={styles.photoError}>{photoError}</Text> : null}
               </View>
             </View>
@@ -1679,7 +1998,6 @@ function OnboardMemberScreen({ managementId, actorName, actorRole, onBack, onSav
             <TextInput value={fullName} onChangeText={setFullName} placeholder="e.g. Sana Mirza" placeholderTextColor="#8D95A1" style={styles.formInput} />
             <Text style={styles.formLabel}>WhatsApp number</Text>
             <View style={styles.whatsappRow}><View style={styles.countryCode}><Text style={styles.countryCodeText}>+91</Text></View><TextInput value={whatsappNumber} onChangeText={(value) => setWhatsappNumber(value.replace(/\D/g, '').slice(0, 10))} placeholder="10-digit mobile number" placeholderTextColor="#8D95A1" keyboardType="phone-pad" style={styles.phoneFormInput} /></View>
-            <Text style={styles.fieldNote}>Member contact number. WhatsApp messaging is currently disabled.</Text>
             <Text style={styles.formLabel}>Membership plan</Text>
             {loadingPlans ? <ActivityIndicator color="#ECEEF1" style={styles.planLoading} /> : <View style={styles.planGrid}>{membershipPlans.map((item) => <Pressable key={item.id} onPress={() => setMembershipPlanId(item.id)} style={[styles.planCard, membershipPlanId === item.id && styles.planCardSelected]}><Text style={styles.planName}>{item.name}</Text><Text style={styles.planAmount}>{currency(item.amount)}</Text><Text style={styles.planDuration}>{planValidityText(item)}</Text></Pressable>)}</View>}
             <Pressable style={[styles.personalTrainingRow, personalTraining && styles.personalTrainingRowOpen]} onPress={() => setPersonalTraining(!personalTraining)} accessibilityRole="switch" accessibilityState={{ checked: personalTraining }}>
@@ -1737,13 +2055,14 @@ function OnboardMemberScreen({ managementId, actorName, actorRole, onBack, onSav
                 <View style={[styles.welcomeToggle, !sendWelcomeMessage && styles.welcomeToggleInactive]}><View style={[styles.welcomeToggleThumb, !sendWelcomeMessage && styles.welcomeToggleThumbInactive]} /></View>
                 <Text style={styles.welcomeMessageText}>Send WhatsApp welcome message · unavailable</Text>
               </Pressable>
-              {formError ? <Text style={styles.error}>{formError}</Text> : null}
-              {successMessage ? <Text style={styles.successMessage}>{successMessage}</Text> : null}
-              <Pressable style={[styles.completeOnboardButton, saving && styles.disabledButton]} onPress={addMember} disabled={saving}>
-                {saving ? <ActivityIndicator color="#16191E" /> : <Text style={styles.primaryButtonText}>Add member</Text>}
+              <AlertBanner message={formError} />
+              <AlertBanner message={successMessage} variant="success" />
+              <Pressable style={[styles.completeOnboardButton, { backgroundColor: roleTheme.primary }, saving && styles.disabledButton]} onPress={addMember} disabled={saving}>
+                {saving ? <ActivityIndicator color={roleTheme.onPrimary} /> : <Text style={[styles.primaryButtonText, { color: roleTheme.onPrimary }]}>Add member</Text>}
               </Pressable>
             </View>
           </ScrollView>
+          </KeyboardAvoidingView>
           <BottomNavigation managementId={managementId} active="members" onHomePress={onHome} onMembersPress={onBack} onCollectPress={onCollect} onPaymentsPress={onPayments} onRemindersPress={onReminders} />
         </View>
       </SafeAreaView>
@@ -1752,365 +2071,391 @@ function OnboardMemberScreen({ managementId, actorName, actorRole, onBack, onSav
 }
 
 const dashboardStyles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: '#121417' },
-  membersPhoneFrame: { flex: 1, width: '100%', backgroundColor: '#121417' },
-  homeContent: { width: '100%', maxWidth: 680, alignSelf: 'center', padding: 12, paddingBottom: 28 },
-  homeGreeting: { color: '#ECEEF1', fontSize: 30, fontWeight: '800' },
-  membersSubtitle: { color: '#8D95A1', fontSize: 16 },
-  homeDate: { color: '#8D95A1', fontSize: 16, marginVertical: 18 },
-  profileCircle: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#ECEEF1', alignItems: 'center', justifyContent: 'center' },
-  profileInitial: { color: '#121417', fontWeight: '800', fontSize: 20 },
+  screen: { flex: 1, backgroundColor: '#0F1115' },
+  dashboardBgImage: { resizeMode: 'cover', opacity: 0.75 },
+  dashboardBgScrim: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(15, 17, 21, 0.62)' },
+  membersPhoneFrame: { flex: 1, width: '100%', backgroundColor: '#0F1115' },
+  homeContent: { width: '100%', maxWidth: 680, alignSelf: 'center', padding: 18, paddingBottom: 32 },
+  homeGreeting: { color: '#F3F5F7', fontSize: 26, fontWeight: '800', letterSpacing: -0.5 },
+  membersSubtitle: { color: '#9BA3B0', fontSize: 14, marginTop: 2 },
+  homeDate: { color: '#9BA3B0', fontSize: 14, fontWeight: '600', marginVertical: 14 },
+  profileCircle: { width: 42, height: 42, borderRadius: 21, backgroundColor: '#FFC83A', alignItems: 'center', justifyContent: 'center' },
+  profileInitial: { color: '#1A1400', fontWeight: '900', fontSize: 17 },
   homeTiles: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', gap: 10 },
-  homeTile: { width: '48%', minHeight: 110, borderWidth: 1, borderColor: '#2B3038', borderRadius: 16, backgroundColor: '#1D2127', padding: 14 },
-  homeTileLabel: { color: '#8D95A1', fontSize: 16 },
-  homeTileValue: { color: '#ECEEF1', fontSize: 34, fontWeight: '800', marginTop: 6 },
-  homeTileSub: { color: '#8D95A1', fontSize: 15 },
-  homePaymentSplit: { color: '#8D95A1', fontSize: 12, marginTop: 5 },
-  homeTileValueWarning: { color: '#F2A54A' },
-  homeTileValueOverdue: { color: '#F2766E' },
-  homeSectionTitle: { color: '#8D95A1', fontSize: 15, fontWeight: '700', letterSpacing: 1 },
-  homeLink: { color: '#ECEEF1', fontSize: 16, textDecorationLine: 'underline' },
-  homeActionList: { backgroundColor: '#1D2127', borderWidth: 1, borderColor: '#2B3038', borderRadius: 16, overflow: 'hidden' },
-  homeAction: { minHeight: 78, flexDirection: 'row', alignItems: 'center', gap: 14, padding: 14, borderBottomWidth: 1, borderBottomColor: '#2B3038' },
-  homeActionIcon: { width: 44, height: 44, borderRadius: 12, backgroundColor: '#3A3014', alignItems: 'center', justifyContent: 'center' },
-  homeActionGlyph: { color: '#ECEEF1', fontSize: 27 },
-  homeActionTitle: { color: '#ECEEF1', fontSize: 18, fontWeight: '700' },
-  homeActionDescription: { color: '#8D95A1', fontSize: 16, lineHeight: 22, marginTop: 3 },
-  followUpTabs: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: '#2B3038', marginBottom: 14 },
-  followUpTab: { flex: 1, flexDirection: 'row', gap: 6, flexWrap: 'wrap', paddingVertical: 16, justifyContent: 'center', alignItems: 'center', borderBottomWidth: 3, borderBottomColor: 'transparent' },
-  followUpTabSelected: { borderBottomColor: '#ECEEF1' },
-  followUpTabText: { color: '#8D95A1', fontSize: 15, fontWeight: '700' },
-  followUpTabTextSelected: { color: '#ECEEF1' },
-  dueBadge: { borderRadius: 20, backgroundColor: '#382812', paddingHorizontal: 8, paddingVertical: 3 },
-  dueBadgeText: { color: '#F2A54A', fontWeight: '700' },
-  overBadge: { borderRadius: 20, backgroundColor: '#3B1C1A', paddingHorizontal: 8, paddingVertical: 3 },
-  overBadgeText: { color: '#F2766E', fontWeight: '700' },
-  homeFollowList: { backgroundColor: '#1D2127', borderRadius: 16, borderWidth: 1, borderColor: '#2B3038', overflow: 'hidden' },
-  homeFollowRow: { minHeight: 76, flexDirection: 'row', alignItems: 'center', padding: 14, borderBottomWidth: 1, borderBottomColor: '#2B3038' },
-  memberName: { color: '#ECEEF1', fontSize: 18, fontWeight: '700' },
-  memberDetail: { color: '#F2A54A', fontSize: 15, marginTop: 4 },
-  memberAvatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#171A1F', borderWidth: 1, borderColor: '#2B3038', alignItems: 'center', justifyContent: 'center', marginRight: 12 },
-  memberAvatarText: { color: '#C5CAD2', fontWeight: '700' },
-  dashboardNav: { flexDirection: 'row', backgroundColor: '#1D2127', borderTopWidth: 1, borderTopColor: '#2B3038', paddingTop: 8 },
+  homeTile: { width: '48.5%', minHeight: 106, borderWidth: 1, borderColor: '#2A313D', borderRadius: 16, backgroundColor: '#181C22', padding: 14, justifyContent: 'space-between' },
+  homeTileLabel: { color: '#9BA3B0', fontSize: 13, fontWeight: '600' },
+  homeTileValue: { color: '#F3F5F7', fontSize: 30, fontWeight: '900', marginTop: 6, letterSpacing: -0.5 },
+  homeTileSub: { color: '#6E7785', fontSize: 13, marginTop: 2 },
+  homePaymentSplit: { color: '#6E7785', fontSize: 12, marginTop: 5 },
+  homeTileValueWarning: { color: '#FBBF24' },
+  homeTileValueOverdue: { color: '#F87171' },
+  homeSectionTitle: { color: '#9BA3B0', fontSize: 12, fontWeight: '800', letterSpacing: 1.1, textTransform: 'uppercase' },
+  homeLink: { color: '#FFC83A', fontSize: 14, fontWeight: '700' },
+  homeActionList: { backgroundColor: '#181C22', borderWidth: 1, borderColor: '#2A313D', borderRadius: 16, overflow: 'hidden' },
+  homeAction: { minHeight: 72, flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 14, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#242A35' },
+  homeActionIcon: { width: 42, height: 42, borderRadius: 12, backgroundColor: 'rgba(255, 200, 58, 0.14)', borderWidth: 1, borderColor: 'rgba(255, 200, 58, 0.25)', alignItems: 'center', justifyContent: 'center' },
+  homeActionGlyph: { color: '#FFC83A', fontSize: 21, fontWeight: '800' },
+  homeActionTitle: { color: '#F3F5F7', fontSize: 16, fontWeight: '700' },
+  homeActionDescription: { color: '#9BA3B0', fontSize: 13, lineHeight: 18, marginTop: 2 },
+  followUpTabs: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: '#2A313D', marginBottom: 12 },
+  followUpTab: { flex: 1, flexDirection: 'row', gap: 8, flexWrap: 'wrap', paddingVertical: 13, justifyContent: 'center', alignItems: 'center', borderBottomWidth: 2, borderBottomColor: 'transparent' },
+  followUpTabSelected: { borderBottomColor: '#FFC83A' },
+  followUpTabText: { color: '#6E7785', fontSize: 14, fontWeight: '700' },
+  followUpTabTextSelected: { color: '#F3F5F7' },
+  dueBadge: { borderRadius: 20, backgroundColor: 'rgba(251, 191, 36, 0.14)', paddingHorizontal: 8, paddingVertical: 2 },
+  dueBadgeText: { color: '#FBBF24', fontSize: 12, fontWeight: '800' },
+  overBadge: { borderRadius: 20, backgroundColor: 'rgba(248, 113, 113, 0.14)', paddingHorizontal: 8, paddingVertical: 2 },
+  overBadgeText: { color: '#F87171', fontSize: 12, fontWeight: '800' },
+  homeFollowList: { backgroundColor: '#181C22', borderRadius: 16, borderWidth: 1, borderColor: '#2A313D', overflow: 'hidden' },
+  homeFollowRow: { minHeight: 70, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#242A35' },
+  memberName: { color: '#F3F5F7', fontSize: 16, fontWeight: '700' },
+  memberDetail: { color: '#9BA3B0', fontSize: 13, marginTop: 3 },
+  memberAvatar: { width: 42, height: 42, borderRadius: 21, backgroundColor: '#252B36', borderWidth: 1, borderColor: '#363F4E', alignItems: 'center', justifyContent: 'center', marginRight: 12 },
+  memberAvatarText: { color: '#F3F5F7', fontSize: 13, fontWeight: '800' },
+  dashboardNav: { flexDirection: 'row', backgroundColor: '#161920', borderTopWidth: 1, borderTopColor: '#2A313D', paddingTop: 8 },
   dashboardNavItem: { flex: 1, alignItems: 'center' },
-  dashboardNavIcon: { width: 58, height: 40, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
-  dashboardNavActive: { backgroundColor: '#3A3014' },
-  dashboardRupee: { color: '#8D95A1', fontSize: 29 },
-  dashboardNavBadge: { position: 'absolute', top: -3, right: 1, backgroundColor: '#F2766E', borderRadius: 12, minWidth: 20, alignItems: 'center' },
-  dashboardNavBadgeText: { color: '#121417', fontSize: 14, padding: 2 },
+  dashboardNavIcon: { width: 52, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
+  dashboardNavActive: { backgroundColor: 'rgba(255, 200, 58, 0.16)' },
+  dashboardRupee: { color: '#8D95A1', fontSize: 22 },
+  dashboardNavBadge: { position: 'absolute', top: -2, right: 4, backgroundColor: '#EF4444', borderRadius: 10, minWidth: 18, height: 18, alignItems: 'center', justifyContent: 'center' },
+  dashboardNavBadgeText: { color: '#FFFFFF', fontSize: 11, fontWeight: '800', paddingHorizontal: 4 },
 });
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: '#121417' },
+  screen: { flex: 1, backgroundColor: '#0F1115' },
+  dashboardBgImage: { resizeMode: 'cover', opacity: 0.75 },
+  dashboardBgScrim: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(15, 17, 21, 0.62)' },
   safeArea: { flex: 1 },
-  rolePicker: { flex: 1, backgroundColor: '#121417' },
-  roleHero: { minHeight: 295, padding: 24, justifyContent: 'flex-end', overflow: 'hidden' },
-  roleKicker: { color: '#F2A54A', fontSize: 14, letterSpacing: 2.1, fontWeight: '900', marginTop: 26 },
-  roleHeading: { color: '#FFFFFF', fontSize: 41, lineHeight: 42, fontWeight: '900', letterSpacing: -1.2, marginTop: 10 },
-  roleDescription: { color: '#E0E3E7', fontSize: 15, lineHeight: 22, maxWidth: 300, marginTop: 10 },
-  roleBody: { flex: 1, width: '100%', maxWidth: 720, alignSelf: 'center', padding: 20 },
-  roleTitle: { color: '#ECEEF1', fontSize: 25, fontWeight: '900' },
-  roleSubtitle: { color: '#A6AEBB', fontSize: 15, marginTop: 3, marginBottom: 16 },
-  roleCard: { minHeight: 86, borderWidth: 1, borderColor: '#353C46', borderRadius: 14, backgroundColor: '#1D2127', flexDirection: 'row', alignItems: 'center', padding: 13, gap: 12, marginBottom: 10 },
-  roleIcon: { width: 44, height: 44, borderRadius: 12, backgroundColor: '#3A3014', alignItems: 'center', justifyContent: 'center' },
-  roleIconText: { color: '#ECEEF1', fontSize: 25, fontWeight: '900' },
+  rolePicker: { flex: 1, backgroundColor: '#0F1115' },
+  roleHero: { minHeight: 248, padding: 24, justifyContent: 'space-between', overflow: 'hidden' },
+  roleKicker: { color: '#FFC83A', fontSize: 12, letterSpacing: 2.2, fontWeight: '800', marginTop: 14 },
+  roleHeading: { color: '#FFFFFF', fontSize: 34, lineHeight: 38, fontWeight: '900', letterSpacing: -1, marginTop: 6 },
+  roleDescription: { color: '#D0D6E0', fontSize: 14, lineHeight: 20, maxWidth: 320, marginTop: 6 },
+  roleBody: { flex: 1, width: '100%', maxWidth: 720, alignSelf: 'center', paddingHorizontal: 20, paddingTop: 18, backgroundColor: '#0F1115' },
+  roleBodyScroll: { flexGrow: 1 },
+  roleTitle: { color: '#F3F5F7', fontSize: 22, fontWeight: '800', letterSpacing: -0.3 },
+  roleSubtitle: { color: '#9BA3B0', fontSize: 14, marginTop: 4, marginBottom: 18 },
+  roleCard: { minHeight: 84, borderWidth: 1, borderColor: '#2A313D', borderRadius: 16, backgroundColor: '#181C22', flexDirection: 'row', alignItems: 'center', padding: 15, gap: 14, marginBottom: 12 },
+  roleIcon: { width: 46, height: 46, borderRadius: 13, backgroundColor: 'rgba(255, 200, 58, 0.14)', borderWidth: 1, borderColor: 'rgba(255, 200, 58, 0.25)', alignItems: 'center', justifyContent: 'center' },
+  roleIconText: { color: '#FFC83A', fontSize: 22, fontWeight: '800' },
   roleCopy: { flex: 1 },
-  roleCardTitle: { color: '#ECEEF1', fontSize: 18, fontWeight: '900' },
-  rolePeople: { color: '#A6AEBB', fontSize: 14, fontWeight: '700', marginTop: 2 },
-  roleCardDetail: { color: '#A6AEBB', fontSize: 13, marginTop: 4 },
+  roleCardTitle: { color: '#F3F5F7', fontSize: 17, fontWeight: '800' },
+  rolePeople: { color: '#FFC83A', fontSize: 13, fontWeight: '700', marginTop: 2 },
+  roleCardDetail: { color: '#9BA3B0', fontSize: 13, marginTop: 3 },
   memberNavItem: { flex: 1, alignItems: 'center', position: 'relative', minWidth: 0 },
-  memberNavActiveIcon: { width: 56, height: 30, borderRadius: 16, backgroundColor: '#3A3014', alignItems: 'center', justifyContent: 'center' },
-  memberNavIcon: { color: '#A6AEBB', fontSize: 24, lineHeight: 28, height: 29 },
-  memberCard: { borderRadius: 17, backgroundColor: '#15191F', overflow: 'hidden', marginTop: 2 },
-  memberCardTape: { height: 9, backgroundColor: '#FFC83A' },
-  memberCardInside: { padding: 16 },
-  memberCardGym: { color: '#B3BBC6', fontSize: 13, letterSpacing: 1.4, fontWeight: '800' },
-  memberCardPerson: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 12 },
-  memberCardPhoto: { width: 43, height: 43, borderRadius: 22, resizeMode: 'cover' },
-  memberCardName: { color: '#FFFFFF', fontSize: 29, fontWeight: '900', flex: 1 },
+  memberNavActiveIcon: { backgroundColor: 'rgba(255, 200, 58, 0.16)' },
+  memberNavIcon: { color: '#9BA3B0', fontSize: 22, lineHeight: 26, height: 26 },
+  memberCard: { borderRadius: 18, backgroundColor: '#181C22', borderWidth: 1, borderColor: '#2A313D', overflow: 'hidden', marginTop: 2 },
+  memberCardTape: { height: 7, backgroundColor: '#FFC83A' },
+  memberCardInside: { padding: 18 },
+  memberCardGym: { color: '#9BA3B0', fontSize: 12, letterSpacing: 1.5, fontWeight: '800' },
+  memberCardPerson: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 12 },
+  memberCardPhoto: { width: 44, height: 44, borderRadius: 22, resizeMode: 'cover' },
+  memberCardName: { color: '#FFFFFF', fontSize: 26, fontWeight: '900', flex: 1 },
   memberCardGrid: { flexDirection: 'row', justifyContent: 'space-between', gap: 8, marginTop: 18 },
-  memberCardLabel: { color: '#A6AFBA', fontSize: 11, fontWeight: '800', letterSpacing: 0.8 },
-  memberCardValue: { color: '#F8FAFC', fontSize: 14, fontWeight: '800', marginTop: 4, maxWidth: 88 },
-  memberProgress: { height: 6, borderRadius: 3, backgroundColor: '#343C47', marginTop: 18, overflow: 'hidden' },
+  memberCardLabel: { color: '#6E7785', fontSize: 11, fontWeight: '800', letterSpacing: 0.8 },
+  memberCardValue: { color: '#F3F5F7', fontSize: 14, fontWeight: '800', marginTop: 4, maxWidth: 88 },
+  memberProgress: { height: 6, borderRadius: 3, backgroundColor: '#2A313D', marginTop: 18, overflow: 'hidden' },
   memberProgressFill: { height: '100%', borderRadius: 3, backgroundColor: '#FFC83A' },
-  memberCardNote: { color: '#B3BBC6', fontSize: 13, marginTop: 7 },
-  memberAlert: { marginTop: 15, borderRadius: 12, backgroundColor: '#3A3014', padding: 13 },
-  memberAlertTitle: { color: '#ECEEF1', fontSize: 16, fontWeight: '900' },
-  memberAlertCopy: { color: '#A6AEBB', fontSize: 14, lineHeight: 20, marginTop: 4 },
-  darkSmallButton: { alignSelf: 'flex-start', marginTop: 10, minHeight: 33, paddingHorizontal: 12, borderRadius: 8, justifyContent: 'center', backgroundColor: '#1B222C' },
-  darkSmallButtonText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' },
-  memberQuickList: { borderWidth: 1, borderColor: '#353C46', backgroundColor: '#1D2127', borderRadius: 13, overflow: 'hidden', marginTop: 8 },
-  renewPlanCard: { borderRadius: 14, borderWidth: 1, borderColor: '#353C46', backgroundColor: '#1D2127', padding: 15, marginTop: 2 },
-  renewPlanName: { color: '#ECEEF1', fontSize: 24, fontWeight: '900', marginTop: 5 },
-  renewPlanAmount: { color: '#ECEEF1', fontSize: 30, fontWeight: '900', marginTop: 8 },
-  upiCard: { borderRadius: 13, borderWidth: 1, borderColor: '#353C46', backgroundColor: '#1D2127', padding: 13, flexDirection: 'row', alignItems: 'center', gap: 13, marginTop: 8 },
-  sampleQr: { width: 72, height: 72, borderRadius: 9, borderWidth: 5, borderColor: '#1C252F', alignItems: 'center', justifyContent: 'center' },
-  sampleQrText: { color: '#ECEEF1', fontSize: 14, fontWeight: '900' },
-  stepsCard: { borderRadius: 13, borderWidth: 1, borderColor: '#353C46', backgroundColor: '#1D2127', gap: 8, padding: 13, marginTop: 8 },
-  memberUpdatesToggle: { minHeight: 73, borderRadius: 13, borderWidth: 1, borderColor: '#353C46', backgroundColor: '#1D2127', flexDirection: 'row', alignItems: 'center', gap: 12, padding: 13, marginTop: 2 },
-  messageChat: { backgroundColor: '#163222', borderRadius: 14, padding: 10, gap: 8, marginTop: 18 },
-  messageBubble: { alignSelf: 'flex-start', maxWidth: '94%', backgroundColor: '#1D2127', borderRadius: 10, paddingHorizontal: 11, paddingTop: 8, paddingBottom: 6 },
-  messageKind: { color: '#5BCB89', fontSize: 12, letterSpacing: 0.7, fontWeight: '900' },
-  messageText: { color: '#ECEEF1', fontSize: 15, lineHeight: 21, marginTop: 3 },
-  messageDate: { color: '#A6AEBB', fontSize: 12, alignSelf: 'flex-end', marginTop: 4 },
-  scrollContent: { flexGrow: 1, alignItems: 'stretch', justifyContent: 'center' },
-  phoneFrame: { width: '100%', minHeight: '100%', overflow: 'hidden', backgroundColor: '#111419' },
-  hero: { height: 310, overflow: 'hidden', backgroundColor: 'transparent', paddingHorizontal: 24, paddingTop: 18, justifyContent: 'space-between' },
+  memberCardNote: { color: '#9BA3B0', fontSize: 13, marginTop: 8 },
+  memberAlert: { marginTop: 15, borderRadius: 14, backgroundColor: 'rgba(255, 200, 58, 0.12)', borderWidth: 1, borderColor: 'rgba(255, 200, 58, 0.28)', padding: 14 },
+  memberAlertTitle: { color: '#F3F5F7', fontSize: 16, fontWeight: '800' },
+  memberAlertCopy: { color: '#9BA3B0', fontSize: 14, lineHeight: 20, marginTop: 4 },
+  darkSmallButton: { alignSelf: 'flex-start', marginTop: 10, minHeight: 34, paddingHorizontal: 14, borderRadius: 9, justifyContent: 'center', backgroundColor: '#252B36', borderWidth: 1, borderColor: '#363F4E' },
+  darkSmallButtonText: { color: '#F3F5F7', fontSize: 13, fontWeight: '700' },
+  memberQuickList: { borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#181C22', borderRadius: 14, overflow: 'hidden', marginTop: 8 },
+  renewPlanCard: { borderRadius: 16, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#181C22', padding: 16, marginTop: 2 },
+  renewPlanName: { color: '#F3F5F7', fontSize: 22, fontWeight: '900', marginTop: 5 },
+  renewPlanAmount: { color: '#FFC83A', fontSize: 28, fontWeight: '900', marginTop: 6 },
+  upiCard: { borderRadius: 14, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#181C22', padding: 14, flexDirection: 'row', alignItems: 'center', gap: 13, marginTop: 8 },
+  sampleQr: { width: 72, height: 72, borderRadius: 10, borderWidth: 4, borderColor: '#2A313D', backgroundColor: '#12151B', alignItems: 'center', justifyContent: 'center' },
+  sampleQrText: { color: '#F3F5F7', fontSize: 13, fontWeight: '900' },
+  stepsCard: { borderRadius: 14, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#181C22', gap: 8, padding: 14, marginTop: 8 },
+  memberUpdatesToggle: { minHeight: 73, borderRadius: 14, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#181C22', flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, marginTop: 2 },
+  messageChat: { backgroundColor: 'rgba(52, 211, 153, 0.1)', borderWidth: 1, borderColor: 'rgba(52, 211, 153, 0.25)', borderRadius: 14, padding: 12, gap: 8, marginTop: 18 },
+  messageBubble: { alignSelf: 'flex-start', maxWidth: '94%', backgroundColor: '#181C22', borderRadius: 12, paddingHorizontal: 12, paddingTop: 8, paddingBottom: 8 },
+  messageKind: { color: '#34D399', fontSize: 11, letterSpacing: 0.8, fontWeight: '900' },
+  messageText: { color: '#F3F5F7', fontSize: 15, lineHeight: 21, marginTop: 3 },
+  messageDate: { color: '#6E7785', fontSize: 12, alignSelf: 'flex-end', marginTop: 4 },
+  scrollContent: { flexGrow: 1, alignItems: 'stretch' },
+  phoneFrame: { flex: 1, width: '100%', overflow: 'hidden', backgroundColor: '#0F1115' },
+  hero: { height: 244, overflow: 'hidden', backgroundColor: '#0F1115', paddingHorizontal: 22, paddingTop: 14, paddingBottom: 32, justifyContent: 'space-between' },
   heroPhoto: { resizeMode: 'cover', opacity: 1 },
-  heroShade: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(8, 10, 12, 0.48)' },
+  heroShade: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(9, 11, 15, 0.54)' },
+  heroBottomFade: { position: 'absolute', left: 0, right: 0, bottom: 0, height: 110, backgroundColor: 'rgba(15, 17, 21, 0.55)' },
   statusRow: { height: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginHorizontal: 4 },
   statusTime: { color: '#FFFFFF', fontSize: 15, fontWeight: '800' },
   statusIcons: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   statusSignal: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' },
-  heroTopLine: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 6 },
-  logoMark: { width: 50, height: 50, borderRadius: 25, borderWidth: 2, borderColor: 'rgba(255,255,255,0.92)' },
-  tagline: { color: '#D4D8DD', fontSize: 13, letterSpacing: 2.1, fontWeight: '800' },
-  heroCopy: { paddingBottom: 18 },
-  welcome: { color: '#F2A54A', fontSize: 15, fontWeight: '900', letterSpacing: 2.2, marginBottom: 4 },
-  brandName: { color: '#FFFFFF', fontSize: 45, lineHeight: 44, letterSpacing: -1.7, fontWeight: '900' },
-  brandDetail: { color: '#D0D4D9', fontSize: 15, lineHeight: 22, marginTop: 8 },
-  loginCard: { flex: 1, width: '100%', maxWidth: 680, alignSelf: 'center', marginTop: -2, borderTopLeftRadius: 30, borderTopRightRadius: 30, paddingHorizontal: 20, paddingTop: 28, paddingBottom: 34, backgroundColor: '#121417' },
-  cardTitle: { color: '#ECEEF1', fontSize: 25, lineHeight: 32, fontWeight: '800' },
-  cardSubtitle: { color: '#A6AEBB', fontSize: 16, lineHeight: 23, marginTop: 4, marginBottom: 26 },
-  label: { color: '#A6AEBB', fontSize: 16, fontWeight: '700', marginBottom: 10 },
-  mobileInputRow: { height: 52, flexDirection: 'row', overflow: 'hidden', borderWidth: 1, borderColor: '#353C46', borderRadius: 12, backgroundColor: '#1D2127' },
-  countryCode: { justifyContent: 'center', alignItems: 'center', width: 48, borderRightWidth: 1, borderRightColor: '#353C46' },
-  countryCodeText: { color: '#A6AEBB', fontSize: 16 },
-  mobileInput: { flex: 1, color: '#ECEEF1', fontSize: 18, paddingHorizontal: 14 },
-  hint: { color: '#A6AEBB', fontSize: 14, lineHeight: 20, marginTop: 10 },
-  error: { color: '#F2766E', fontSize: 15, lineHeight: 21, marginTop: 12 },
-  primaryButton: { height: 52, borderRadius: 12, backgroundColor: '#FFC83A', justifyContent: 'center', alignItems: 'center', marginTop: 20 },
-  disabledButton: { opacity: 0.65 },
-  primaryButtonText: { color: '#1A1400', fontSize: 18, fontWeight: '800' },
-  credentialInput: { height: 52, borderRadius: 12, borderWidth: 1, borderColor: '#353C46', backgroundColor: '#1D2127', color: '#ECEEF1', fontSize: 18, paddingHorizontal: 14 },
-  otpInput: { letterSpacing: 6, textAlign: 'center', fontWeight: '700' },
-  changeNumberButton: { alignSelf: 'center', paddingVertical: 16 },
-  changeNumberText: { color: '#A6AEBB', fontSize: 15, fontWeight: '700' },
+  heroTopLine: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 },
+  heroTopLeft: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  heroBackBtn: { width: 38, height: 38, borderRadius: 19, backgroundColor: 'rgba(15, 17, 21, 0.7)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)', alignItems: 'center', justifyContent: 'center' },
+  logoMark: { width: 46, height: 46, borderRadius: 23, borderWidth: 2, borderColor: 'rgba(255,255,255,0.9)' },
+  taglinePill: { backgroundColor: 'rgba(15, 17, 21, 0.65)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.18)', borderRadius: 20, paddingHorizontal: 12, paddingVertical: 5 },
+  tagline: { color: '#F3F5F7', fontSize: 11, letterSpacing: 1.6, fontWeight: '800' },
+  heroCopy: { paddingBottom: 4 },
+  welcome: { color: '#FFC83A', fontSize: 12, fontWeight: '900', letterSpacing: 2.1, marginBottom: 4 },
+  brandName: { color: '#FFFFFF', fontSize: 36, lineHeight: 40, letterSpacing: -1, fontWeight: '900' },
+  brandMetaRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginTop: 10 },
+  rolePill: { backgroundColor: 'rgba(255, 200, 58, 0.18)', borderWidth: 1, borderColor: 'rgba(255, 200, 58, 0.45)', borderRadius: 8, paddingHorizontal: 9, paddingVertical: 3 },
+  rolePillText: { color: '#FFC83A', fontSize: 12, fontWeight: '800' },
+  brandDetail: { color: '#D0D6E0', fontSize: 13, fontWeight: '600' },
+  loginCard: { flex: 1, width: '100%', maxWidth: 680, alignSelf: 'center', marginTop: -22, borderTopLeftRadius: 26, borderTopRightRadius: 26, borderTopWidth: 1, borderColor: '#262C36', paddingHorizontal: 22, paddingTop: 22, paddingBottom: 36, backgroundColor: '#0F1115' },
+  backPillButton: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 20, backgroundColor: '#181C22', borderWidth: 1, borderColor: '#2A313D', marginBottom: 20 },
+  backPillText: { color: '#9BA3B0', fontSize: 13, fontWeight: '700' },
+  cardTitle: { color: '#F3F5F7', fontSize: 24, lineHeight: 30, fontWeight: '800', letterSpacing: -0.4 },
+  cardSubtitle: { color: '#9BA3B0', fontSize: 15, lineHeight: 22, marginTop: 6, marginBottom: 24 },
+  label: { color: '#D0D6E0', fontSize: 13, fontWeight: '700', letterSpacing: 0.3, marginBottom: 8 },
+  mobileInputRow: { height: 54, flexDirection: 'row', overflow: 'hidden', borderWidth: 1, borderColor: '#2A313D', borderRadius: 14, backgroundColor: '#161A21' },
+  countryCode: { justifyContent: 'center', alignItems: 'center', width: 54, borderRightWidth: 1, borderRightColor: '#2A313D', backgroundColor: '#181C22' },
+  countryCodeText: { color: '#F3F5F7', fontSize: 15, fontWeight: '700' },
+  mobileInput: { flex: 1, color: '#F3F5F7', fontSize: 17, fontWeight: '600', paddingHorizontal: 14 },
+  hint: { color: '#6E7785', fontSize: 13, lineHeight: 19, marginTop: 10 },
+  error: { color: '#F87171', fontSize: 14, lineHeight: 20, marginTop: 12, fontWeight: '600' },
+  alertBanner: { flexDirection: 'row', alignItems: 'flex-start', gap: 9, borderRadius: 12, borderWidth: 1, paddingHorizontal: 12, paddingVertical: 10, marginTop: 12 },
+  alertBannerError: { backgroundColor: 'rgba(248, 113, 113, 0.12)', borderColor: 'rgba(248, 113, 113, 0.35)' },
+  alertBannerSuccess: { backgroundColor: 'rgba(52, 211, 153, 0.12)', borderColor: 'rgba(52, 211, 153, 0.35)' },
+  alertBannerInfo: { backgroundColor: 'rgba(56, 189, 248, 0.12)', borderColor: 'rgba(56, 189, 248, 0.35)' },
+  alertBannerIcon: { marginTop: 2 },
+  alertBannerText: { flex: 1, fontSize: 13, lineHeight: 19, fontWeight: '600' },
+  primaryButton: { height: 54, borderRadius: 14, backgroundColor: '#FFC83A', justifyContent: 'center', alignItems: 'center', marginTop: 24, shadowColor: '#FFC83A', shadowOpacity: 0.18, shadowRadius: 10, elevation: 4 },
+  disabledButton: { opacity: 0.6 },
+  primaryButtonText: { color: '#1A1400', fontSize: 16, fontWeight: '800', letterSpacing: 0.2 },
+  credentialInput: { height: 54, borderRadius: 14, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#161A21', color: '#F3F5F7', fontSize: 17, paddingHorizontal: 14 },
+  otpInput: { letterSpacing: 8, textAlign: 'center', fontWeight: '800', fontSize: 20 },
+  changeNumberButton: { alignSelf: 'center', paddingVertical: 14 },
+  changeNumberText: { color: '#9BA3B0', fontSize: 14, fontWeight: '700' },
   successContent: { alignItems: 'center', paddingVertical: 38 },
-  successBadge: { width: 56, height: 56, borderRadius: 28, backgroundColor: '#163222', justifyContent: 'center', alignItems: 'center', marginBottom: 18 },
-  successIcon: { color: '#5BCB89', fontSize: 32, fontWeight: '900' },
-  secondaryButton: { marginTop: 24, paddingHorizontal: 20, paddingVertical: 12, borderRadius: 10, borderWidth: 1, borderColor: '#353C46' },
-  secondaryButtonText: { color: '#ECEEF1', fontSize: 16, fontWeight: '700' },
-  membersPhoneFrame: { flex: 1, width: '100%', backgroundColor: '#121417' },
-  appStatusRow: { height: 38, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 22, backgroundColor: '#1D2127' },
-  appStatusTime: { color: '#ECEEF1', fontSize: 14, fontWeight: '800' },
+  successBadge: { width: 58, height: 58, borderRadius: 29, backgroundColor: 'rgba(52, 211, 153, 0.15)', borderWidth: 1, borderColor: 'rgba(52, 211, 153, 0.35)', justifyContent: 'center', alignItems: 'center', marginBottom: 18 },
+  successIcon: { color: '#34D399', fontSize: 30, fontWeight: '900' },
+  secondaryButton: { marginTop: 24, paddingHorizontal: 20, paddingVertical: 12, borderRadius: 12, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#181C22' },
+  secondaryButtonText: { color: '#F3F5F7', fontSize: 15, fontWeight: '700' },
+  poweredByFooter: { marginTop: 'auto', paddingTop: 20, paddingBottom: 8, alignItems: 'center' },
+  poweredByText: { color: '#6E7785', fontSize: 12, fontWeight: '600', textAlign: 'center' },
+  poweredByBrand: { color: '#9BA3B0', fontWeight: '700' },
+  membersPhoneFrame: { flex: 1, width: '100%', backgroundColor: '#0F1115' },
+  appStatusRow: { height: 38, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 22, backgroundColor: '#181C22' },
+  appStatusTime: { color: '#F3F5F7', fontSize: 14, fontWeight: '800' },
   appStatusIcons: { flexDirection: 'row', alignItems: 'center', gap: 5 },
-  appStatusSignal: { color: '#ECEEF1', fontSize: 13, fontWeight: '800' },
+  appStatusSignal: { color: '#F3F5F7', fontSize: 13, fontWeight: '800' },
   lightText: { color: '#FFFFFF' },
   membersContent: { flex: 1, width: '100%', maxWidth: 920, alignSelf: 'center', paddingHorizontal: 18, paddingTop: 16 },
   screenHeader: { width: '100%', maxWidth: 920, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 18, paddingTop: 16, paddingBottom: 14 },
   homeScroll: { flex: 1 },
   homeContent: { width: '100%', maxWidth: 920, alignSelf: 'center', paddingHorizontal: 18, paddingTop: 16, paddingBottom: 100 },
-  homeGreeting: { color: '#ECEEF1', fontSize: 27, letterSpacing: -0.8, fontWeight: '900' },
-  homeDate: { color: '#A6AEBB', fontSize: 14, marginTop: -5, marginBottom: 16 },
-  homeTiles: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  homeTile: { width: '48.8%', minHeight: 104, borderWidth: 1, borderColor: '#353C46', borderRadius: 13, backgroundColor: '#1D2127', padding: 12, justifyContent: 'space-between' },
-  homeTileLabel: { color: '#A6AEBB', fontSize: 14, lineHeight: 19 },
-  homeTileValue: { color: '#ECEEF1', fontSize: 28, lineHeight: 33, fontWeight: '900', marginTop: 6 },
-  homeTileValueWarning: { color: '#F2A54A' },
-  homeTileValueOverdue: { color: '#F2766E' },
-  homeTileSub: { color: '#A6AEBB', fontSize: 13, marginTop: 4 },
-  homeSection: { marginTop: 20 },
-  homeSectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
-  homeSectionTitle: { color: '#ECEEF1', fontSize: 18, fontWeight: '900' },
-  homeLink: { color: '#A6AEBB', fontSize: 14, fontWeight: '800' },
-  homeActionList: { borderWidth: 1, borderColor: '#353C46', borderRadius: 13, backgroundColor: '#1D2127', overflow: 'hidden' },
-  homeAction: { minHeight: 68, flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 12, borderBottomWidth: 1, borderBottomColor: '#353C46' },
-  homeActionIcon: { width: 38, height: 38, borderRadius: 10, backgroundColor: '#3A3014', alignItems: 'center', justifyContent: 'center' },
-  homeActionGlyph: { color: '#ECEEF1', fontSize: 23, fontWeight: '700' },
+  homeGreeting: { color: '#F3F5F7', fontSize: 26, letterSpacing: -0.6, fontWeight: '900' },
+  homeDate: { color: '#9BA3B0', fontSize: 14, marginTop: -5, marginBottom: 16 },
+  homeTiles: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  homeTile: { width: '48.5%', minHeight: 104, borderWidth: 1, borderColor: '#2A313D', borderRadius: 16, backgroundColor: '#181C22', padding: 14, justifyContent: 'space-between' },
+  homeTileLabel: { color: '#9BA3B0', fontSize: 13, lineHeight: 18, fontWeight: '600' },
+  homeTileValue: { color: '#F3F5F7', fontSize: 28, lineHeight: 33, fontWeight: '900', marginTop: 6 },
+  homeTileValueWarning: { color: '#FBBF24' },
+  homeTileValueOverdue: { color: '#F87171' },
+  homeTileSub: { color: '#6E7785', fontSize: 13, marginTop: 4 },
+  homeSection: { marginTop: 22 },
+  homeSectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
+  homeSectionTitle: { color: '#9BA3B0', fontSize: 12, fontWeight: '800', letterSpacing: 1.1, textTransform: 'uppercase' },
+  homeLink: { color: '#FFC83A', fontSize: 14, fontWeight: '700' },
+  homeActionList: { borderWidth: 1, borderColor: '#2A313D', borderRadius: 16, backgroundColor: '#181C22', overflow: 'hidden' },
+  homeAction: { minHeight: 70, flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 14, borderBottomWidth: 1, borderBottomColor: '#242A35' },
+  homeActionIcon: { width: 40, height: 40, borderRadius: 11, backgroundColor: 'rgba(255, 200, 58, 0.14)', borderWidth: 1, borderColor: 'rgba(255, 200, 58, 0.25)', alignItems: 'center', justifyContent: 'center' },
+  homeActionGlyph: { color: '#FFC83A', fontSize: 21, fontWeight: '800' },
   homeActionCopy: { flex: 1 },
-  homeActionTitle: { color: '#ECEEF1', fontSize: 16, fontWeight: '800' },
-  homeActionDescription: { color: '#A6AEBB', fontSize: 13, lineHeight: 18, marginTop: 2 },
-  homeActionArrow: { color: '#A6AEBB', fontSize: 29, lineHeight: 30 },
-  followUpTabs: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: '#353C46' },
-  followUpTab: { flex: 1, paddingVertical: 10, alignItems: 'center', borderBottomWidth: 2, borderBottomColor: 'transparent', marginBottom: -1 },
-  followUpTabSelected: { borderBottomColor: '#1B222C' },
-  followUpTabText: { color: '#A6AEBB', fontSize: 14, fontWeight: '700' },
-  followUpTabTextSelected: { color: '#ECEEF1' },
-  followUpCount: { color: '#A6AEBB', fontWeight: '900' },
-  homeEmpty: { minHeight: 78, borderWidth: 1, borderColor: '#353C46', borderTopWidth: 0, backgroundColor: '#1D2127', alignItems: 'center', justifyContent: 'center' },
-  homeFollowList: { borderWidth: 1, borderColor: '#353C46', borderTopWidth: 0, backgroundColor: '#1D2127' },
-  homeFollowRow: { minHeight: 61, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 11, borderBottomWidth: 1, borderBottomColor: '#353C46' },
-  homeFollowArrow: { color: '#A6AEBB', fontSize: 28, marginLeft: 8 },
-  broadcastCard: { marginTop: 8, borderRadius: 13, borderWidth: 1, borderColor: '#353C46', backgroundColor: '#1D2127', padding: 13 },
-  broadcastLabel: { color: '#A6AEBB', fontSize: 14, fontWeight: '800', marginBottom: 8 },
-  broadcastInput: { minHeight: 76, borderRadius: 10, borderWidth: 1, borderColor: '#353C46', backgroundColor: '#1D2127', color: '#ECEEF1', fontSize: 15, paddingHorizontal: 12, paddingTop: 11, textAlignVertical: 'top' },
-  broadcastButton: { height: 40, borderRadius: 9, backgroundColor: '#1B222C', justifyContent: 'center', alignItems: 'center', marginTop: 11 },
-  broadcastButtonText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' },
-  broadcastHelp: { color: '#A6AEBB', fontSize: 13, lineHeight: 19, marginTop: 8 },
+  homeActionTitle: { color: '#F3F5F7', fontSize: 16, fontWeight: '700' },
+  homeActionDescription: { color: '#9BA3B0', fontSize: 13, lineHeight: 18, marginTop: 2 },
+  homeActionArrow: { color: '#6E7785', fontSize: 26, lineHeight: 28 },
+  followUpTabs: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: '#2A313D' },
+  followUpTab: { flex: 1, paddingVertical: 11, alignItems: 'center', borderBottomWidth: 2, borderBottomColor: 'transparent', marginBottom: -1 },
+  followUpTabSelected: { borderBottomColor: '#FFC83A' },
+  followUpTabText: { color: '#6E7785', fontSize: 14, fontWeight: '700' },
+  followUpTabTextSelected: { color: '#F3F5F7' },
+  followUpCount: { color: '#9BA3B0', fontWeight: '900' },
+  homeEmpty: { minHeight: 80, borderWidth: 1, borderColor: '#2A313D', borderTopWidth: 0, borderBottomLeftRadius: 14, borderBottomRightRadius: 14, backgroundColor: '#181C22', alignItems: 'center', justifyContent: 'center' },
+  homeFollowList: { borderWidth: 1, borderColor: '#2A313D', borderTopWidth: 0, borderBottomLeftRadius: 14, borderBottomRightRadius: 14, backgroundColor: '#181C22', overflow: 'hidden' },
+  homeFollowRow: { minHeight: 64, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, borderBottomWidth: 1, borderBottomColor: '#242A35' },
+  homeFollowArrow: { color: '#6E7785', fontSize: 26, marginLeft: 8 },
+  broadcastCard: { marginTop: 8, borderRadius: 14, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#181C22', padding: 14 },
+  broadcastLabel: { color: '#9BA3B0', fontSize: 13, fontWeight: '700', marginBottom: 8 },
+  broadcastInput: { minHeight: 76, borderRadius: 12, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#12151B', color: '#F3F5F7', fontSize: 15, paddingHorizontal: 12, paddingTop: 11, textAlignVertical: 'top' },
+  broadcastButton: { height: 42, borderRadius: 10, backgroundColor: '#252B36', borderWidth: 1, borderColor: '#363F4E', justifyContent: 'center', alignItems: 'center', marginTop: 11 },
+  broadcastButtonText: { color: '#F3F5F7', fontSize: 14, fontWeight: '700' },
+  broadcastHelp: { color: '#6E7785', fontSize: 13, lineHeight: 19, marginTop: 8 },
   paymentsScroll: { flex: 1 },
   paymentsContent: { width: '100%', maxWidth: 920, alignSelf: 'center', paddingHorizontal: 18, paddingBottom: 100 },
-  paymentFilterRow: { flexDirection: 'row', gap: 8, marginTop: -4, marginBottom: 16 },
-  paymentFilterChip: { height: 34, borderRadius: 17, borderWidth: 1, borderColor: '#353C46', backgroundColor: '#1D2127', paddingHorizontal: 13, justifyContent: 'center' },
-  paymentFilterChipSelected: { borderColor: '#FFC83A', backgroundColor: '#3A3014' },
-  paymentFilterChipText: { color: '#A6AEBB', fontSize: 14, fontWeight: '700' },
-  paymentFilterChipTextSelected: { color: '#FFFFFF' },
-  paymentTotalLine: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  paymentTotalLabel: { color: '#A6AEBB', fontSize: 15 },
-  paymentTotalValue: { color: '#ECEEF1', fontSize: 20, fontWeight: '900' },
-  reminderSummary: { minHeight: 91, borderRadius: 13, borderWidth: 1, borderColor: '#353C46', backgroundColor: '#1D2127', padding: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 14, marginTop: 2 },
-  reminderNumber: { color: '#ECEEF1', fontSize: 28, lineHeight: 32, fontWeight: '900' },
-  reminderCopy: { color: '#A6AEBB', fontSize: 14, marginTop: 2 },
-  reminderSendButton: { height: 37, borderRadius: 9, backgroundColor: '#1B222C', justifyContent: 'center', paddingHorizontal: 13 },
-  reminderSendText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' },
-  reminderConfirmation: { color: '#5BCB89', fontSize: 14, fontWeight: '700', marginTop: 8 },
-  singleReminderButton: { height: 31, borderRadius: 8, backgroundColor: '#1B222C', justifyContent: 'center', paddingHorizontal: 12, marginLeft: 8 },
-  singleReminderText: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' },
-  reminderSettings: { marginTop: 8, borderRadius: 13, borderWidth: 1, borderColor: '#353C46', backgroundColor: '#1D2127', paddingHorizontal: 13, paddingVertical: 4 },
-  reminderToggleRow: { minHeight: 49, flexDirection: 'row', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#353C46', gap: 11 },
-  reminderToggleLabel: { color: '#ECEEF1', fontSize: 15, flex: 1 },
-  reminderHelp: { color: '#A6AEBB', fontSize: 13, lineHeight: 19, paddingTop: 11, paddingBottom: 7 },
+  paymentFilterRow: { flexDirection: 'row', gap: 8, marginTop: -2, marginBottom: 16 },
+  paymentFilterChip: { height: 35, borderRadius: 18, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#181C22', paddingHorizontal: 14, justifyContent: 'center' },
+  paymentFilterChipSelected: { borderColor: '#FFC83A', backgroundColor: 'rgba(255, 200, 58, 0.16)' },
+  paymentFilterChipText: { color: '#9BA3B0', fontSize: 13, fontWeight: '700' },
+  paymentFilterChipTextSelected: { color: '#FFC83A' },
+  paymentTotalLine: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
+  paymentTotalLabel: { color: '#9BA3B0', fontSize: 14, fontWeight: '600' },
+  paymentTotalValue: { color: '#F3F5F7', fontSize: 20, fontWeight: '900' },
+  reminderSummary: { minHeight: 91, borderRadius: 16, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#181C22', padding: 15, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 14, marginTop: 2 },
+  reminderNumber: { color: '#F3F5F7', fontSize: 28, lineHeight: 32, fontWeight: '900' },
+  reminderCopy: { color: '#9BA3B0', fontSize: 14, marginTop: 2 },
+  reminderSendButton: { height: 38, borderRadius: 10, backgroundColor: '#252B36', borderWidth: 1, borderColor: '#363F4E', justifyContent: 'center', paddingHorizontal: 14 },
+  reminderSendText: { color: '#F3F5F7', fontSize: 13, fontWeight: '700' },
+  reminderConfirmation: { color: '#34D399', fontSize: 14, fontWeight: '700', marginTop: 8 },
+  singleReminderButton: { height: 32, borderRadius: 8, backgroundColor: '#252B36', borderWidth: 1, borderColor: '#363F4E', justifyContent: 'center', paddingHorizontal: 12, marginLeft: 8 },
+  singleReminderText: { color: '#F3F5F7', fontSize: 12, fontWeight: '700' },
+  reminderSettings: { marginTop: 8, borderRadius: 14, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#181C22', paddingHorizontal: 14, paddingVertical: 4 },
+  reminderToggleRow: { minHeight: 50, flexDirection: 'row', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#242A35', gap: 11 },
+  reminderToggleLabel: { color: '#F3F5F7', fontSize: 15, flex: 1 },
+  reminderHelp: { color: '#6E7785', fontSize: 13, lineHeight: 19, paddingTop: 11, paddingBottom: 7 },
   membersTitleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 15 },
-  membersTitle: { color: '#ECEEF1', fontSize: 27, letterSpacing: -0.8, fontWeight: '900' },
-  membersSubtitle: { color: '#A6AEBB', fontSize: 14, marginTop: 2 },
-  profileCircle: { width: 37, height: 37, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: '#151D27' },
-  profileInitial: { color: '#FFFFFF', fontSize: 15, fontWeight: '800' },
-  searchBox: { height: 46, borderWidth: 1, borderColor: '#353C46', borderRadius: 12, backgroundColor: '#1D2127', flexDirection: 'row', alignItems: 'center', paddingHorizontal: 13, gap: 10 },
-  searchIcon: { color: '#A6AEBB', fontSize: 27, lineHeight: 28, transform: [{ rotate: '-18deg' }] },
-  searchHint: { color: '#A6AEBB', fontSize: 16 },
-  membersSearchInput: { flex: 1, height: 46, color: '#ECEEF1', fontSize: 16, padding: 0 },
+  membersTitle: { color: '#F3F5F7', fontSize: 26, letterSpacing: -0.6, fontWeight: '900' },
+  membersSubtitle: { color: '#9BA3B0', fontSize: 14, marginTop: 2 },
+  profileCircle: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: '#FFC83A' },
+  profileInitial: { color: '#1A1400', fontSize: 16, fontWeight: '900' },
+  searchBox: { height: 48, borderWidth: 1, borderColor: '#2A313D', borderRadius: 14, backgroundColor: '#161A21', flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, gap: 10 },
+  searchIcon: { color: '#6E7785', fontSize: 24, lineHeight: 26 },
+  searchHint: { color: '#6E7785', fontSize: 15 },
+  membersSearchInput: { flex: 1, height: 48, color: '#F3F5F7', fontSize: 15, padding: 0 },
   membersFilterBar: { flexGrow: 0, flexShrink: 0 },
-  filterRow: { gap: 8, paddingVertical: 18, paddingRight: 16 },
-  filterChip: { height: 35, borderRadius: 20, borderWidth: 1, borderColor: '#353C46', backgroundColor: '#1D2127', paddingHorizontal: 13, alignItems: 'center', justifyContent: 'center' },
-  filterChipSelected: { backgroundColor: '#3A3014', borderColor: '#FFC83A' },
-  filterText: { color: '#A6AEBB', fontSize: 14, fontWeight: '700' },
-  filterTextSelected: { color: '#FFFFFF' },
+  filterRow: { gap: 8, paddingVertical: 14, paddingRight: 16 },
+  filterChip: { height: 35, borderRadius: 18, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#181C22', paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center' },
+  filterChipSelected: { backgroundColor: 'rgba(255, 200, 58, 0.16)', borderColor: '#FFC83A' },
+  filterText: { color: '#9BA3B0', fontSize: 13, fontWeight: '700' },
+  filterTextSelected: { color: '#FFC83A' },
   membersList: { flex: 1, marginHorizontal: -1 },
-  membersListContent: { flexGrow: 0, justifyContent: 'flex-start', paddingTop: 0, paddingBottom: 105 },
+  membersListContent: { flexGrow: 0, justifyContent: 'flex-start', paddingTop: 2, paddingBottom: 105 },
   memberRows: { width: '100%', alignSelf: 'flex-start' },
-  memberRow: { minHeight: 61, flexDirection: 'row', alignItems: 'center', backgroundColor: '#1D2127', borderWidth: 1, borderColor: '#353C46', paddingHorizontal: 11, marginBottom: -1 },
+  memberRow: { minHeight: 68, flexDirection: 'row', alignItems: 'center', backgroundColor: '#181C22', borderWidth: 1, borderColor: '#2A313D', borderRadius: 14, paddingHorizontal: 13, paddingVertical: 10, marginBottom: 8 },
   memberSheetModal: { flex: 1, justifyContent: 'flex-end' },
-  memberSheetBackdrop: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, backgroundColor: 'rgba(10, 16, 24, 0.42)' },
-  memberSheet: { width: '100%', maxWidth: 720, maxHeight: '90%', alignSelf: 'center', borderTopLeftRadius: 22, borderTopRightRadius: 22, backgroundColor: '#1D2127', paddingHorizontal: 18, paddingBottom: 24, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 16, elevation: 16 },
-  sheetHandle: { width: 42, height: 4, borderRadius: 3, backgroundColor: '#59616E', alignSelf: 'center', marginVertical: 10 },
+  memberSheetBackdrop: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, backgroundColor: 'rgba(5, 7, 10, 0.65)' },
+  memberSheet: { width: '100%', maxWidth: 720, maxHeight: '90%', alignSelf: 'center', borderTopLeftRadius: 24, borderTopRightRadius: 24, borderTopWidth: 1, borderColor: '#2A313D', backgroundColor: '#181C22', paddingHorizontal: 18, paddingBottom: 24, shadowColor: '#000', shadowOpacity: 0.35, shadowRadius: 18, elevation: 16 },
+  sheetHandle: { width: 40, height: 4, borderRadius: 3, backgroundColor: '#3A4250', alignSelf: 'center', marginVertical: 10 },
   memberSheetLoading: { marginVertical: 44 },
   memberSheetContent: { paddingBottom: 4 },
   sheetHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 14 },
   sheetAvatar: { width: 48, height: 48, borderRadius: 24, marginRight: 12 },
   sheetMemberCopy: { flex: 1 },
-  sheetMemberName: { color: '#ECEEF1', fontSize: 21, fontWeight: '900' },
-  sheetMemberPhone: { color: '#A6AEBB', fontSize: 15, marginTop: 3 },
-  sheetCloseButton: { width: 35, height: 35, borderRadius: 18, backgroundColor: '#1D2127', alignItems: 'center', justifyContent: 'center' },
-  sheetCloseText: { color: '#ECEEF1', fontSize: 29, fontWeight: '300', lineHeight: 33 },
+  sheetMemberName: { color: '#F3F5F7', fontSize: 20, fontWeight: '900' },
+  sheetMemberPhone: { color: '#9BA3B0', fontSize: 14, marginTop: 3 },
+  sheetCloseButton: { width: 34, height: 34, borderRadius: 17, backgroundColor: '#252B36', borderWidth: 1, borderColor: '#363F4E', alignItems: 'center', justifyContent: 'center' },
+  sheetCloseText: { color: '#F3F5F7', fontSize: 22, fontWeight: '400', lineHeight: 24 },
   sheetStatus: { alignSelf: 'flex-start', marginBottom: 0 },
-  validityNote: { color: '#A6AEBB', fontSize: 14, marginLeft: 85, marginTop: -19, marginBottom: 13 },
-  detailRows: { marginTop: 0 },
-  detailRow: { minHeight: 28, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 5 },
-  detailRowLabel: { color: '#A6AEBB', fontSize: 15, flex: 0.42 },
-  detailRowValue: { color: '#ECEEF1', fontSize: 15, fontWeight: '700', lineHeight: 21, textAlign: 'right', flex: 0.58 },
-  collectPaymentButton: { height: 48, borderRadius: 11, backgroundColor: '#FFC83A', marginTop: 15, alignItems: 'center', justifyContent: 'center' },
-  collectPaymentText: { color: '#1A1400', fontSize: 16, fontWeight: '900' },
-  sheetActionMessage: { color: '#A6AEBB', textAlign: 'center', fontSize: 13, marginTop: 7 },
-  paymentHistorySection: { marginTop: 16 },
-  paymentHistoryTitle: { color: '#A6AEBB', fontSize: 13, fontWeight: '900', letterSpacing: 1 },
-  emptyPaymentHistory: { minHeight: 54, marginTop: 8, borderWidth: 1, borderColor: '#353C46', borderRadius: 11, alignItems: 'center', justifyContent: 'center' },
-  emptyPaymentHistoryText: { color: '#A6AEBB', fontSize: 15 },
-  paymentHistoryList: { marginTop: 8, borderWidth: 1, borderColor: '#353C46', borderRadius: 11, overflow: 'hidden' },
-  paymentHistoryRow: { minHeight: 67, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 11, borderBottomWidth: 1, borderBottomColor: '#353C46', gap: 10 },
-  paymentModeBadge: { width: 43, height: 39, borderRadius: 9, backgroundColor: '#3A3014', alignItems: 'center', justifyContent: 'center' },
-  cashModeBadge: { backgroundColor: '#1D2127', borderWidth: 1, borderColor: '#353C46' },
-  paymentModeText: { color: '#ECEEF1', fontSize: 12, fontWeight: '900' },
+  validityNote: { color: '#9BA3B0', fontSize: 13, marginLeft: 85, marginTop: -19, marginBottom: 13 },
+  detailRows: { marginTop: 4 },
+  detailRow: { minHeight: 30, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 6 },
+  detailRowLabel: { color: '#9BA3B0', fontSize: 14, flex: 0.42 },
+  detailRowValue: { color: '#F3F5F7', fontSize: 14, fontWeight: '700', lineHeight: 20, textAlign: 'right', flex: 0.58 },
+  collectPaymentButton: { height: 50, borderRadius: 12, backgroundColor: '#FFC83A', marginTop: 16, alignItems: 'center', justifyContent: 'center' },
+  collectPaymentText: { color: '#1A1400', fontSize: 16, fontWeight: '800' },
+  sheetActionMessage: { color: '#9BA3B0', textAlign: 'center', fontSize: 13, marginTop: 8 },
+  paymentHistorySection: { marginTop: 18 },
+  paymentHistoryTitle: { color: '#9BA3B0', fontSize: 12, fontWeight: '800', letterSpacing: 1 },
+  emptyPaymentHistory: { minHeight: 54, marginTop: 8, borderWidth: 1, borderColor: '#2A313D', borderRadius: 12, backgroundColor: '#12151B', alignItems: 'center', justifyContent: 'center' },
+  emptyPaymentHistoryText: { color: '#6E7785', fontSize: 14 },
+  paymentHistoryList: { marginTop: 8, borderWidth: 1, borderColor: '#2A313D', borderRadius: 14, backgroundColor: '#181C22', overflow: 'hidden' },
+  paymentHistoryRow: { minHeight: 68, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 13, borderBottomWidth: 1, borderBottomColor: '#242A35', gap: 11 },
+  paymentModeBadge: { width: 44, height: 38, borderRadius: 10, backgroundColor: 'rgba(255, 200, 58, 0.14)', borderWidth: 1, borderColor: 'rgba(255, 200, 58, 0.3)', alignItems: 'center', justifyContent: 'center' },
+  cashModeBadge: { backgroundColor: '#252B36', borderWidth: 1, borderColor: '#363F4E' },
+  paymentModeText: { color: '#F3F5F7', fontSize: 11, fontWeight: '900' },
   paymentHistoryCopy: { flex: 1 },
-  paymentHistoryName: { color: '#ECEEF1', fontSize: 15, fontWeight: '800' },
-  paymentHistoryMeta: { color: '#A6AEBB', fontSize: 13, marginTop: 3 },
+  paymentHistoryName: { color: '#F3F5F7', fontSize: 15, fontWeight: '700' },
+  paymentHistoryMeta: { color: '#9BA3B0', fontSize: 13, marginTop: 3 },
   paymentHistoryAmount: { alignItems: 'flex-end' },
-  paymentHistoryAmountText: { color: '#ECEEF1', fontSize: 16, fontWeight: '900' },
-  paymentScreenshotLabel: { color: '#A6AEBB', fontSize: 12, marginTop: 3 },
-  collectScreen: { flex: 1, width: '100%', backgroundColor: '#1D2127' },
-  selectField: { minHeight: 49, borderRadius: 10, borderWidth: 1, borderColor: '#353C46', backgroundColor: '#1D2127', flexDirection: 'row', alignItems: 'center', paddingHorizontal: 13, gap: 10 },
-  selectFieldText: { flex: 1, color: '#ECEEF1', fontSize: 16 },
-  selectFieldPlaceholder: { color: '#A6AEBB' },
-  selectFieldCaret: { color: '#ECEEF1', fontSize: 24, lineHeight: 25, marginTop: -4 },
+  paymentHistoryAmountText: { color: '#F3F5F7', fontSize: 16, fontWeight: '900' },
+  paymentScreenshotLabel: { color: '#FFC83A', fontSize: 12, fontWeight: '600', marginTop: 3 },
+  collectScreen: { flex: 1, width: '100%', backgroundColor: '#0F1115' },
+  selectField: { minHeight: 50, borderRadius: 12, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#161A21', flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, gap: 10 },
+  selectFieldText: { flex: 1, color: '#F3F5F7', fontSize: 15, fontWeight: '600' },
+  selectFieldPlaceholder: { color: '#6E7785' },
+  selectFieldCaret: { color: '#9BA3B0', fontSize: 20, lineHeight: 22, marginTop: -2 },
   selectModalRoot: { flex: 1, justifyContent: 'flex-end' },
-  selectModalSheet: { width: '100%', maxWidth: 720, height: '75%', maxHeight: '90%', alignSelf: 'center', borderTopLeftRadius: 22, borderTopRightRadius: 22, backgroundColor: '#1D2127', paddingHorizontal: 18, paddingBottom: 24, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 16, elevation: 18 },
-  selectModalTitle: { color: '#ECEEF1', fontSize: 20, fontWeight: '900', marginBottom: 12 },
+  selectModalSheet: { width: '100%', maxWidth: 720, height: '75%', maxHeight: '90%', alignSelf: 'center', borderTopLeftRadius: 24, borderTopRightRadius: 24, borderTopWidth: 1, borderColor: '#2A313D', backgroundColor: '#181C22', paddingHorizontal: 18, paddingBottom: 24, shadowColor: '#000', shadowOpacity: 0.35, shadowRadius: 18, elevation: 18 },
+  selectModalTitle: { color: '#F3F5F7', fontSize: 19, fontWeight: '800', marginBottom: 12 },
   selectModalOptions: { flex: 1, marginHorizontal: -18 },
   selectModalOptionsContent: { paddingBottom: 8 },
-  selectGroupTitle: { color: '#A6AEBB', fontSize: 13, fontWeight: '900', letterSpacing: 0.7, paddingHorizontal: 18, paddingTop: 15, paddingBottom: 7, backgroundColor: '#1D2127' },
-  selectOption: { minHeight: 54, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#353C46' },
-  selectOptionSelected: { backgroundColor: '#3A3014' },
-  selectOptionText: { flex: 1, color: '#ECEEF1', fontSize: 16 },
-  selectOptionTextSelected: { fontWeight: '800' },
-  selectOptionCheck: { color: '#ECEEF1', fontSize: 19, fontWeight: '900' },
-  collectMemberHint: { color: '#A6AEBB', fontSize: 14, marginTop: 7 },
-  collectEmptyState: { minHeight: 78, marginTop: 15, paddingHorizontal: 18, borderWidth: 1, borderStyle: 'dashed', borderColor: '#353C46', borderRadius: 14, backgroundColor: '#1D2127', alignItems: 'center', justifyContent: 'center' },
-  collectEmptyText: { color: '#A6AEBB', fontSize: 15, lineHeight: 23, textAlign: 'center' },
-  collectPickerTitle: { color: '#ECEEF1', fontSize: 22, fontWeight: '900', marginTop: 4 },
-  collectPickerHint: { color: '#A6AEBB', fontSize: 15, marginTop: 5, marginBottom: 16 },
-  collectMemberPicker: { borderWidth: 1, borderColor: '#353C46', borderRadius: 12, overflow: 'hidden', backgroundColor: '#1D2127' },
-  collectMemberChoice: { minHeight: 67, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 12, borderBottomWidth: 1, borderBottomColor: '#353C46' },
+  selectGroupTitle: { color: '#9BA3B0', fontSize: 12, fontWeight: '800', letterSpacing: 0.8, paddingHorizontal: 18, paddingTop: 14, paddingBottom: 7, backgroundColor: '#14171D' },
+  selectOption: { minHeight: 54, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#242A35' },
+  selectOptionSelected: { backgroundColor: 'rgba(255, 200, 58, 0.14)' },
+  selectOptionText: { flex: 1, color: '#F3F5F7', fontSize: 15 },
+  selectOptionTextSelected: { fontWeight: '800', color: '#FFC83A' },
+  selectOptionCheck: { color: '#FFC83A', fontSize: 18, fontWeight: '900' },
+  collectMemberHint: { color: '#9BA3B0', fontSize: 13, marginTop: 7 },
+  collectEmptyState: { minHeight: 82, marginTop: 16, paddingHorizontal: 18, borderWidth: 1, borderStyle: 'dashed', borderColor: '#2A313D', borderRadius: 14, backgroundColor: '#181C22', alignItems: 'center', justifyContent: 'center' },
+  collectEmptyText: { color: '#9BA3B0', fontSize: 14, lineHeight: 22, textAlign: 'center' },
+  collectPickerTitle: { color: '#F3F5F7', fontSize: 21, fontWeight: '800', marginTop: 4 },
+  collectPickerHint: { color: '#9BA3B0', fontSize: 14, marginTop: 5, marginBottom: 16 },
+  collectMemberPicker: { borderWidth: 1, borderColor: '#2A313D', borderRadius: 14, overflow: 'hidden', backgroundColor: '#181C22' },
+  collectMemberChoice: { minHeight: 67, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 13, borderBottomWidth: 1, borderBottomColor: '#242A35' },
   collectMemberChoiceCopy: { flex: 1, minWidth: 0 },
-  collectMemberCard: { minHeight: 68, borderRadius: 12, borderWidth: 1, borderColor: '#353C46', backgroundColor: '#1D2127', flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, gap: 10 },
-  collectMemberName: { color: '#ECEEF1', fontSize: 17, fontWeight: '900' },
-  collectMemberMeta: { color: '#A6AEBB', fontSize: 14, marginTop: 3 },
+  collectMemberCard: { minHeight: 68, borderRadius: 14, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#181C22', flexDirection: 'row', alignItems: 'center', paddingHorizontal: 13, gap: 10 },
+  collectMemberName: { color: '#F3F5F7', fontSize: 16, fontWeight: '800' },
+  collectMemberMeta: { color: '#9BA3B0', fontSize: 13, marginTop: 3 },
   trainingSwitchActive: { backgroundColor: '#FFC83A' },
   collectSummaryExtra: { marginTop: 9 },
-  paymentModeRow: { height: 46, borderWidth: 1, borderColor: '#353C46', borderRadius: 10, backgroundColor: '#1D2127', flexDirection: 'row', padding: 3, gap: 3 },
-  paymentModeButton: { flex: 1, borderRadius: 7, alignItems: 'center', justifyContent: 'center' },
-  paymentModeButtonSelected: { backgroundColor: '#3A3014' },
-  paymentModeButtonText: { color: '#A6AEBB', fontSize: 14, fontWeight: '800' },
-  paymentModeButtonTextSelected: { color: '#FFFFFF' },
-  screenshotCard: { minHeight: 150, borderRadius: 14, borderWidth: 1, borderStyle: 'dashed', borderColor: '#353C46', backgroundColor: '#1D2127', padding: 14, alignItems: 'center', justifyContent: 'center' },
-  screenshotIcon: { color: '#A6AEBB', fontSize: 31, lineHeight: 34, marginBottom: 4 },
-  screenshotHint: { color: '#A6AEBB', fontSize: 14, lineHeight: 20, textAlign: 'center', marginBottom: 10 },
-  screenshotButtonRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
-  attachScreenshotButton: { height: 33, paddingHorizontal: 13, borderRadius: 8, backgroundColor: '#1B222C', justifyContent: 'center' },
-  attachScreenshotText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' },
-  sampleScreenshotButton: { height: 33, paddingHorizontal: 13, borderRadius: 8, borderWidth: 1, borderColor: '#353C46', backgroundColor: '#1D2127', justifyContent: 'center' },
-  sampleScreenshotText: { color: '#ECEEF1', fontSize: 14, fontWeight: '800' },
-  screenshotPreview: { width: 68, height: 68, borderRadius: 8, resizeMode: 'cover' },
-  screenshotCopy: { alignItems: 'center', marginTop: 7 },
-  screenshotAttachedText: { color: '#5BCB89', fontSize: 14, fontWeight: '800' },
-  replaceScreenshotText: { color: '#A6AEBB', fontSize: 14, fontWeight: '700', marginTop: 4 },
-  paymentValidity: { minHeight: 47, borderRadius: 10, backgroundColor: '#1D2127', marginTop: 18, paddingHorizontal: 13, justifyContent: 'center' },
-  paymentValidityLabel: { color: '#A6AEBB', fontSize: 13 },
-  paymentValidityValue: { color: '#ECEEF1', fontSize: 15, fontWeight: '800', marginTop: 3 },
-  paymentSuccess: { flex: 1, width: '100%', maxWidth: 620, alignSelf: 'center', alignItems: 'center', paddingHorizontal: 24, paddingTop: 75 },
-  paymentSuccessTitle: { color: '#ECEEF1', fontSize: 25, fontWeight: '900', marginBottom: 10 },
-  paymentSuccessText: { color: '#A6AEBB', fontSize: 16, textAlign: 'center', lineHeight: 23, marginTop: 3 },
-  paymentDetailSheet: { width: '100%', maxWidth: 720, maxHeight: '82%', alignSelf: 'center', borderTopLeftRadius: 22, borderTopRightRadius: 22, backgroundColor: '#1D2127', paddingHorizontal: 18, paddingBottom: 24, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 16, elevation: 17 },
-  accountSheet: { width: '100%', maxWidth: 720, alignSelf: 'center', borderTopLeftRadius: 22, borderTopRightRadius: 22, backgroundColor: '#1D2127', paddingHorizontal: 18, paddingBottom: 24, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 16, elevation: 17 },
-  accountAvatar: { backgroundColor: '#151D27', alignItems: 'center', justifyContent: 'center' },
-  accountLogoutButton: { height: 45, borderRadius: 10, borderWidth: 1, borderColor: '#353C46', justifyContent: 'center', alignItems: 'center', marginTop: 16 },
-  accountLogoutText: { color: '#ECEEF1', fontSize: 15, fontWeight: '800' },
+  paymentModeRow: { height: 48, borderWidth: 1, borderColor: '#2A313D', borderRadius: 12, backgroundColor: '#161A21', flexDirection: 'row', padding: 4, gap: 4 },
+  paymentModeButton: { flex: 1, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  paymentModeButtonSelected: { backgroundColor: 'rgba(255, 200, 58, 0.16)', borderWidth: 1, borderColor: 'rgba(255, 200, 58, 0.4)' },
+  paymentModeButtonText: { color: '#9BA3B0', fontSize: 14, fontWeight: '700' },
+  paymentModeButtonTextSelected: { color: '#FFC83A', fontWeight: '800' },
+  screenshotCard: { minHeight: 152, borderRadius: 14, borderWidth: 1, borderStyle: 'dashed', borderColor: '#2A313D', backgroundColor: '#181C22', padding: 16, alignItems: 'center', justifyContent: 'center' },
+  screenshotIconWrap: { width: 46, height: 46, borderRadius: 23, backgroundColor: '#252B36', alignItems: 'center', justifyContent: 'center', marginBottom: 8 },
+  screenshotIcon: { color: '#9BA3B0', fontSize: 28, lineHeight: 30, marginBottom: 6 },
+  screenshotHint: { color: '#9BA3B0', fontSize: 13, lineHeight: 20, textAlign: 'center', marginBottom: 12 },
+  screenshotButtonRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10 },
+  attachScreenshotButton: { height: 36, paddingHorizontal: 14, borderRadius: 9, backgroundColor: '#252B36', borderWidth: 1, borderColor: '#363F4E', flexDirection: 'row', alignItems: 'center', gap: 6, justifyContent: 'center' },
+  attachScreenshotText: { color: '#F3F5F7', fontSize: 13, fontWeight: '700' },
+  sampleScreenshotButton: { height: 36, paddingHorizontal: 14, borderRadius: 9, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#161A21', justifyContent: 'center' },
+  sampleScreenshotText: { color: '#9BA3B0', fontSize: 13, fontWeight: '700' },
+  screenshotPreview: { width: 68, height: 68, borderRadius: 10, resizeMode: 'cover' },
+  screenshotCopy: { alignItems: 'center', marginTop: 8 },
+  screenshotAttachedText: { color: '#34D399', fontSize: 14, fontWeight: '800' },
+  replaceScreenshotText: { color: '#9BA3B0', fontSize: 13, fontWeight: '700', marginTop: 4 },
+  paymentValidity: { minHeight: 50, borderRadius: 12, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#181C22', marginTop: 18, paddingHorizontal: 14, paddingVertical: 10, justifyContent: 'center' },
+  paymentValidityLabel: { color: '#9BA3B0', fontSize: 12, fontWeight: '600' },
+  paymentValidityValue: { color: '#F3F5F7', fontSize: 14, fontWeight: '800', marginTop: 3 },
+  paymentSuccess: { flex: 1, width: '100%', maxWidth: 620, alignSelf: 'center', alignItems: 'center', paddingHorizontal: 24, paddingTop: 64 },
+  paymentSuccessTitle: { color: '#F3F5F7', fontSize: 24, fontWeight: '900', marginBottom: 10 },
+  paymentSuccessText: { color: '#9BA3B0', fontSize: 15, textAlign: 'center', lineHeight: 22, marginTop: 3 },
+  paymentDetailSheet: { width: '100%', maxWidth: 720, maxHeight: '82%', alignSelf: 'center', borderTopLeftRadius: 24, borderTopRightRadius: 24, borderTopWidth: 1, borderColor: '#2A313D', backgroundColor: '#181C22', paddingHorizontal: 18, paddingBottom: 24, shadowColor: '#000', shadowOpacity: 0.35, shadowRadius: 18, elevation: 17 },
+  accountSheet: { width: '100%', maxWidth: 720, alignSelf: 'center', borderTopLeftRadius: 24, borderTopRightRadius: 24, borderTopWidth: 1, borderColor: '#2A313D', backgroundColor: '#181C22', paddingHorizontal: 18, paddingBottom: 24, shadowColor: '#000', shadowOpacity: 0.35, shadowRadius: 18, elevation: 17 },
+  accountAvatar: { backgroundColor: '#FFC83A', alignItems: 'center', justifyContent: 'center' },
+  accountLogoutButton: { height: 48, borderRadius: 12, borderWidth: 1, borderColor: 'rgba(248, 113, 113, 0.35)', backgroundColor: 'rgba(248, 113, 113, 0.12)', justifyContent: 'center', alignItems: 'center', marginTop: 18 },
+  accountLogoutInner: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  accountLogoutText: { color: '#F87171', fontSize: 15, fontWeight: '800' },
   paymentDetailHeader: { minHeight: 58, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
-  paymentDetailMode: { color: '#A6AEBB', fontSize: 14, fontWeight: '700' },
-  paymentDetailAmount: { color: '#ECEEF1', fontSize: 29, fontWeight: '900', marginTop: 3 },
-  paymentDetailScreenshot: { marginTop: 16, alignItems: 'center', borderWidth: 1, borderColor: '#353C46', borderRadius: 11, overflow: 'hidden', backgroundColor: '#1D2127' },
+  paymentDetailMode: { color: '#9BA3B0', fontSize: 13, fontWeight: '700' },
+  paymentDetailAmount: { color: '#F3F5F7', fontSize: 28, fontWeight: '900', marginTop: 3 },
+  paymentDetailScreenshot: { marginTop: 16, alignItems: 'center', borderWidth: 1, borderColor: '#2A313D', borderRadius: 12, overflow: 'hidden', backgroundColor: '#12151B' },
   paymentDetailScreenshotImage: { width: '100%', height: 310, resizeMode: 'contain' },
-  paymentDetailScreenshotCaption: { color: '#A6AEBB', fontSize: 13, paddingVertical: 8 },
-  cashPaymentNote: { color: '#A6AEBB', fontSize: 15, textAlign: 'center', marginTop: 18 },
-  memberAvatar: { width: 39, height: 39, borderRadius: 20, backgroundColor: '#1D2127', borderWidth: 1, borderColor: '#353C46', alignItems: 'center', justifyContent: 'center', marginRight: 12 },
-  memberAvatarText: { color: '#A6AEBB', fontSize: 13, fontWeight: '800' },
+  paymentDetailScreenshotCaption: { color: '#9BA3B0', fontSize: 13, paddingVertical: 8 },
+  cashPaymentNote: { color: '#9BA3B0', fontSize: 15, textAlign: 'center', marginTop: 18 },
+  memberAvatar: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#252B36', borderWidth: 1, borderColor: '#363F4E', alignItems: 'center', justifyContent: 'center', marginRight: 12 },
+  memberAvatarText: { color: '#F3F5F7', fontSize: 13, fontWeight: '800' },
   memberAvatarImage: { width: '100%', height: '100%', borderRadius: 999, resizeMode: 'cover' },
   memberCopy: { flex: 1, minWidth: 0 },
-  memberName: { color: '#ECEEF1', fontSize: 16, fontWeight: '800' },
-  memberDetail: { color: '#A6AEBB', fontSize: 14, marginTop: 3 },
-  memberStatus: { minWidth: 65, height: 22, paddingHorizontal: 8, borderRadius: 12, backgroundColor: '#163222', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5 },
-  overdueStatus: { backgroundColor: '#3B1C1A' },
-  dueSoonStatus: { backgroundColor: '#3A3014' },
-  pendingStatus: { backgroundColor: '#1D2127' },
-  statusDot: { color: '#5BCB89', fontSize: 12 },
-  overdueDot: { color: '#F2766E' },
-  dueSoonDot: { color: '#F2A54A' },
-  pendingDot: { color: '#A6AEBB' },
-  memberStatusText: { color: '#5BCB89', fontSize: 13, fontWeight: '800' },
-  overdueStatusText: { color: '#F2766E' },
-  dueSoonStatusText: { color: '#F2A54A' },
-  pendingStatusText: { color: '#A6AEBB' },
+  memberName: { color: '#F3F5F7', fontSize: 16, fontWeight: '700' },
+  memberDetail: { color: '#9BA3B0', fontSize: 13, marginTop: 3 },
+  memberStatus: { minWidth: 68, height: 24, paddingHorizontal: 9, borderRadius: 12, backgroundColor: 'rgba(52, 211, 153, 0.14)', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5 },
+  overdueStatus: { backgroundColor: 'rgba(248, 113, 113, 0.14)' },
+  dueSoonStatus: { backgroundColor: 'rgba(251, 191, 36, 0.14)' },
+  pendingStatus: { backgroundColor: '#252B36' },
+  statusDot: { color: '#34D399', fontSize: 10 },
+  overdueDot: { color: '#F87171' },
+  dueSoonDot: { color: '#FBBF24' },
+  pendingDot: { color: '#9BA3B0' },
+  memberStatusText: { color: '#34D399', fontSize: 12, fontWeight: '800' },
+  overdueStatusText: { color: '#F87171' },
+  dueSoonStatusText: { color: '#FBBF24' },
+  pendingStatusText: { color: '#9BA3B0' },
   memberLoading: { marginTop: 30 },
-  emptyMembersText: { color: '#A6AEBB', textAlign: 'center', marginTop: 28, fontSize: 16 },
-  onboardButton: { position: 'absolute', right: 2, bottom: 10, height: 53, borderRadius: 16, paddingHorizontal: 18, backgroundColor: '#FFC83A', flexDirection: 'row', alignItems: 'center', gap: 8, shadowColor: '#966400', shadowOpacity: 0.22, shadowRadius: 8, elevation: 5 },
-  onboardPlus: { color: '#000000', fontSize: 27, fontWeight: '400' },
-  onboardText: { color: '#000000', fontSize: 16, fontWeight: '800' },
-  bottomNavigation: { height: 76, backgroundColor: '#1D2127', borderTopWidth: 1, borderTopColor: '#353C46', flexDirection: 'row', alignItems: 'flex-start', paddingTop: 8 },
+  emptyMembersText: { color: '#6E7785', textAlign: 'center', marginTop: 28, fontSize: 15 },
+  onboardButton: { position: 'absolute', right: 16, bottom: 14, height: 50, borderRadius: 16, paddingHorizontal: 18, backgroundColor: '#FFC83A', flexDirection: 'row', alignItems: 'center', gap: 8, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 10, elevation: 6 },
+  onboardPlus: { color: '#1A1400', fontSize: 22, fontWeight: '600' },
+  onboardText: { color: '#1A1400', fontSize: 15, fontWeight: '800' },
+  bottomNavigation: { height: 70, backgroundColor: '#161920', borderTopWidth: 1, borderTopColor: '#2A313D', flexDirection: 'row', alignItems: 'flex-start', paddingTop: 8 },
   navItem: { flex: 1, alignItems: 'center', position: 'relative', minWidth: 0 },
-  navIcon: { color: '#A6AEBB', fontSize: 24, lineHeight: 28, height: 29 },
-  rupeeNavIcon: { color: '#A6AEBB', fontSize: 24, lineHeight: 28, height: 29, fontWeight: '600' },
-  navLabel: { color: '#A6AEBB', fontSize: 12, marginTop: 3 },
-  activeNavIcon: { width: 56, height: 30, borderRadius: 16, backgroundColor: '#3A3014', alignItems: 'center', justifyContent: 'center' },
-  activeNavGlyph: { color: '#ECEEF1' },
-  activeNavLabel: { color: '#ECEEF1', fontSize: 12, fontWeight: '800', marginTop: 3 },
+  navIconWrap: { width: 50, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', position: 'relative' },
+  navIcon: { color: '#8D95A1', fontSize: 22, lineHeight: 26, height: 26 },
+  rupeeNavIcon: { color: '#8D95A1', fontSize: 20, lineHeight: 24, height: 24, fontWeight: '700' },
+  navLabel: { color: '#6E7785', fontSize: 11, fontWeight: '600', marginTop: 3 },
+  activeNavIcon: { backgroundColor: 'rgba(255, 200, 58, 0.16)' },
+  activeNavGlyph: { color: '#FFC83A' },
+  activeNavLabel: { color: '#F3F5F7', fontSize: 11, fontWeight: '800', marginTop: 3 },
   peopleNavIcon: { width: 25, height: 22, position: 'relative', marginTop: 4 },
   peopleNavHead: { position: 'absolute', width: 7, height: 7, borderRadius: 5, borderWidth: 1.6, left: 5, top: 0 },
   peopleNavHeadSmall: { position: 'absolute', width: 6, height: 6, borderRadius: 4, borderWidth: 1.4, right: 3, top: 2 },
@@ -2119,106 +2464,107 @@ const styles = StyleSheet.create({
   bellNavStem: { position: 'absolute', width: 5, height: 3, borderRadius: 2, backgroundColor: '#657183', top: 2 },
   bellNavBody: { position: 'absolute', width: 15, height: 16, borderTopLeftRadius: 9, borderTopRightRadius: 9, borderWidth: 1.6, borderColor: '#353C46', borderBottomWidth: 2, top: 5 },
   bellNavClapper: { position: 'absolute', width: 6, height: 3, borderRadius: 2, backgroundColor: '#657183', top: 22 },
-  notificationBadge: { position: 'absolute', right: -9, top: -5, width: 18, height: 18, borderRadius: 9, backgroundColor: '#D54037', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#353C46' },
-  notificationText: { color: '#FFFFFF', fontSize: 12, fontWeight: '800' },
-  onboardHeader: { width: '100%', maxWidth: 920, alignSelf: 'center', minHeight: 64, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', gap: 15, backgroundColor: '#1D2127' },
-  backIcon: { color: '#ECEEF1', fontSize: 39, fontWeight: '300', lineHeight: 40 },
+  notificationBadge: { position: 'absolute', right: 2, top: -3, minWidth: 17, height: 17, paddingHorizontal: 4, borderRadius: 9, backgroundColor: '#EF4444', alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: '#161920' },
+  notificationText: { color: '#FFFFFF', fontSize: 10, fontWeight: '900' },
+  onboardHeader: { width: '100%', maxWidth: 920, alignSelf: 'center', minHeight: 64, paddingHorizontal: 18, paddingVertical: 10, flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#0F1115' },
+  backIconBtn: { width: 38, height: 38, borderRadius: 12, backgroundColor: '#181C22', borderWidth: 1, borderColor: '#2A313D', alignItems: 'center', justifyContent: 'center' },
+  backIcon: { color: '#F3F5F7', fontSize: 32, fontWeight: '300', lineHeight: 34 },
   onboardHeading: { flex: 1 },
-  onboardTitle: { color: '#ECEEF1', fontSize: 24, lineHeight: 28, fontWeight: '900' },
-  onboardSubtitle: { color: '#A6AEBB', fontSize: 14, marginTop: 2 },
-  onboardScroll: { flex: 1, borderTopWidth: 1, borderTopColor: '#353C46' },
-  onboardContent: { width: '100%', maxWidth: 920, alignSelf: 'center', padding: 14, paddingBottom: 28 },
-  photoCard: { minHeight: 137, backgroundColor: '#1D2127', borderWidth: 1, borderColor: '#353C46', borderRadius: 0, padding: 15, flexDirection: 'row', gap: 13 },
-  photoCircle: { width: 86, height: 86, borderRadius: 43, borderWidth: 1, borderStyle: 'dashed', borderColor: '#353C46', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', backgroundColor: '#1D2127' },
-  photoCircleFilled: { borderStyle: 'solid', borderWidth: 2, borderColor: '#20252C' },
-  cameraIcon: { color: '#A6AEBB', fontSize: 32 },
+  onboardTitle: { color: '#F3F5F7', fontSize: 22, lineHeight: 26, fontWeight: '900' },
+  onboardSubtitle: { color: '#9BA3B0', fontSize: 13, marginTop: 2 },
+  onboardScroll: { flex: 1, borderTopWidth: 1, borderTopColor: '#222731' },
+  onboardContent: { width: '100%', maxWidth: 920, alignSelf: 'center', padding: 16, paddingBottom: 32 },
+  photoCard: { minHeight: 134, backgroundColor: '#181C22', borderWidth: 1, borderColor: '#2A313D', borderRadius: 16, padding: 16, flexDirection: 'row', alignItems: 'center', gap: 14 },
+  photoCircle: { width: 82, height: 82, borderRadius: 41, borderWidth: 1.5, borderStyle: 'dashed', borderColor: '#363F4E', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', backgroundColor: '#12151B' },
+  photoCircleFilled: { borderStyle: 'solid', borderWidth: 2, borderColor: '#FFC83A' },
+  cameraIcon: { color: '#6E7785', fontSize: 28 },
   photoRight: { flex: 1 },
-  photoLabel: { color: '#A6AEBB', fontSize: 14, fontWeight: '800', marginBottom: 3 },
-  photoCopy: { color: '#A6AEBB', fontSize: 14, lineHeight: 20, marginBottom: 7 },
-  photoButtonRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 7 },
-  takePhotoButton: { alignSelf: 'flex-start', height: 30, paddingHorizontal: 11, borderRadius: 8, backgroundColor: '#1B222C', justifyContent: 'center' },
-  takePhotoText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' },
-  sampleButton: { alignSelf: 'flex-start', height: 29, paddingHorizontal: 11, borderRadius: 8, borderWidth: 1, borderColor: '#353C46', justifyContent: 'center' },
-  sampleButtonText: { color: '#ECEEF1', fontSize: 14, fontWeight: '700' },
-  photoError: { color: '#F2766E', fontSize: 13, lineHeight: 18, marginTop: 6 },
+  photoLabel: { color: '#F3F5F7', fontSize: 15, fontWeight: '800', marginBottom: 3 },
+  photoCopy: { color: '#9BA3B0', fontSize: 13, lineHeight: 19, marginBottom: 10 },
+  photoButtonRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
+  takePhotoButton: { alignSelf: 'flex-start', height: 34, paddingHorizontal: 12, borderRadius: 9, backgroundColor: '#252B36', borderWidth: 1, borderColor: '#363F4E', flexDirection: 'row', alignItems: 'center', gap: 6, justifyContent: 'center' },
+  takePhotoText: { color: '#F3F5F7', fontSize: 13, fontWeight: '700' },
+  sampleButton: { alignSelf: 'flex-start', height: 34, paddingHorizontal: 12, borderRadius: 9, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#161A21', justifyContent: 'center' },
+  sampleButtonText: { color: '#9BA3B0', fontSize: 13, fontWeight: '700' },
+  photoError: { color: '#F87171', fontSize: 13, lineHeight: 18, marginTop: 6 },
   memberPhotoPreview: { width: '100%', height: '100%', resizeMode: 'cover' },
-  samplePhotoPreview: { width: '100%', height: '100%', alignItems: 'center', justifyContent: 'flex-end', backgroundColor: '#1D2127', overflow: 'hidden' },
+  samplePhotoPreview: { width: '100%', height: '100%', alignItems: 'center', justifyContent: 'flex-end', backgroundColor: '#181C22', overflow: 'hidden' },
   samplePhotoHead: { position: 'absolute', top: 16, width: 32, height: 32, borderRadius: 16, backgroundColor: '#8A98AA' },
   samplePhotoBody: { width: 67, height: 36, borderTopLeftRadius: 34, borderTopRightRadius: 34, backgroundColor: '#8A98AA' },
-  samplePhotoLabel: { position: 'absolute', bottom: 4, color: '#F2A54A', fontSize: 10, letterSpacing: 1.5, fontWeight: '900' },
-  formLabel: { color: '#A6AEBB', fontSize: 14, fontWeight: '800', marginTop: 14, marginBottom: 8 },
-  staticInput: { height: 46, borderRadius: 10, borderWidth: 1, borderColor: '#353C46', backgroundColor: '#1D2127', justifyContent: 'center', paddingHorizontal: 13 },
-  formInput: { height: 46, borderRadius: 10, borderWidth: 1, borderColor: '#353C46', backgroundColor: '#1D2127', color: '#ECEEF1', fontSize: 15, paddingHorizontal: 13 },
-  phoneFormInput: { flex: 1, height: 46, color: '#ECEEF1', fontSize: 15, paddingHorizontal: 12 },
-  dateField: { height: 46, borderRadius: 10, borderWidth: 1, borderColor: '#353C46', backgroundColor: '#1D2127', justifyContent: 'center', paddingHorizontal: 13 },
-  dateFieldText: { color: '#ECEEF1', fontSize: 15 },
-  calendarPanel: { position: 'absolute', top: 52, left: 0, width: 300, borderWidth: 1, borderColor: '#353C46', borderRadius: 10, backgroundColor: '#1D2127', padding: 10, zIndex: 30, elevation: 8, shadowColor: '#000', shadowOpacity: 0.14, shadowRadius: 8 },
+  samplePhotoLabel: { position: 'absolute', bottom: 4, color: '#FFC83A', fontSize: 10, letterSpacing: 1.5, fontWeight: '900' },
+  formLabel: { color: '#D0D6E0', fontSize: 13, fontWeight: '700', marginTop: 16, marginBottom: 8 },
+  staticInput: { height: 48, borderRadius: 12, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#161A21', justifyContent: 'center', paddingHorizontal: 14 },
+  formInput: { height: 48, borderRadius: 12, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#161A21', color: '#F3F5F7', fontSize: 15, paddingHorizontal: 14 },
+  phoneFormInput: { flex: 1, height: 48, color: '#F3F5F7', fontSize: 15, paddingHorizontal: 12 },
+  dateField: { height: 48, borderRadius: 12, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#161A21', justifyContent: 'center', paddingHorizontal: 14 },
+  dateFieldText: { color: '#F3F5F7', fontSize: 15 },
+  calendarPanel: { position: 'absolute', top: 54, left: 0, width: 300, borderWidth: 1, borderColor: '#2A313D', borderRadius: 14, backgroundColor: '#181C22', padding: 12, zIndex: 30, elevation: 10, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 12 },
   calendarHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
-  calendarArrow: { color: '#ECEEF1', fontSize: 29, lineHeight: 30, paddingHorizontal: 5 },
-  calendarArrowDisabled: { color: '#C1C7D0' },
-  calendarMonth: { color: '#ECEEF1', fontSize: 15, fontWeight: '800' },
+  calendarArrow: { color: '#F3F5F7', fontSize: 26, lineHeight: 28, paddingHorizontal: 6 },
+  calendarArrowDisabled: { color: '#4B5563' },
+  calendarMonth: { color: '#F3F5F7', fontSize: 15, fontWeight: '800' },
   calendarWeek: { flexDirection: 'row' },
-  calendarWeekDay: { width: '14.285%', textAlign: 'center', color: '#A6AEBB', fontSize: 12, fontWeight: '800', marginBottom: 4 },
+  calendarWeekDay: { width: '14.285%', textAlign: 'center', color: '#6E7785', fontSize: 12, fontWeight: '800', marginBottom: 4 },
   calendarDays: { flexDirection: 'row', flexWrap: 'wrap' },
   calendarDay: { width: '14.285%', aspectRatio: 1, alignItems: 'center', justifyContent: 'center', borderRadius: 16 },
   calendarDaySelected: { backgroundColor: '#FFC83A' },
-  calendarDayText: { color: '#ECEEF1', fontSize: 13, fontWeight: '700' },
-  calendarDayUnavailable: { color: '#C7CDD5' },
+  calendarDayText: { color: '#F3F5F7', fontSize: 13, fontWeight: '700' },
+  calendarDayUnavailable: { color: '#4B5563' },
   calendarDayTextSelected: { color: '#1A1400', fontWeight: '900' },
-  trainerList: { position: 'absolute', top: 52, left: 0, right: 0, borderWidth: 1, borderColor: '#353C46', borderRadius: 10, backgroundColor: '#1D2127', overflow: 'hidden', zIndex: 30, elevation: 8, shadowColor: '#000', shadowOpacity: 0.14, shadowRadius: 8 },
-  trainerOption: { minHeight: 39, paddingHorizontal: 12, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#353C46', justifyContent: 'center' },
-  trainerOptionSelected: { backgroundColor: '#3A3014' },
-  trainerOptionText: { color: '#ECEEF1', fontSize: 15, fontWeight: '700' },
-  trainerOptionMobile: { color: '#A6AEBB', fontSize: 13, marginTop: 2 },
-  staticPlaceholder: { color: '#A6AEBB', fontSize: 15 },
-  whatsappRow: { height: 46, borderRadius: 10, borderWidth: 1, borderColor: '#353C46', backgroundColor: '#1D2127', flexDirection: 'row', alignItems: 'center', overflow: 'hidden', gap: 12 },
-  fieldNote: { color: '#A6AEBB', fontSize: 14, lineHeight: 19, marginTop: 6 },
-  planGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  trainerList: { position: 'absolute', top: 54, left: 0, right: 0, borderWidth: 1, borderColor: '#2A313D', borderRadius: 12, backgroundColor: '#181C22', overflow: 'hidden', zIndex: 30, elevation: 10, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 12 },
+  trainerOption: { minHeight: 42, paddingHorizontal: 13, paddingVertical: 9, borderBottomWidth: 1, borderBottomColor: '#242A35', justifyContent: 'center' },
+  trainerOptionSelected: { backgroundColor: 'rgba(255, 200, 58, 0.14)' },
+  trainerOptionText: { color: '#F3F5F7', fontSize: 15, fontWeight: '700' },
+  trainerOptionMobile: { color: '#9BA3B0', fontSize: 13, marginTop: 2 },
+  staticPlaceholder: { color: '#6E7785', fontSize: 15 },
+  whatsappRow: { height: 48, borderRadius: 12, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#161A21', flexDirection: 'row', alignItems: 'center', overflow: 'hidden', gap: 12 },
+  fieldNote: { color: '#6E7785', fontSize: 13, lineHeight: 19, marginTop: 6 },
+  planGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
   planLoading: { minHeight: 80, justifyContent: 'center' },
-  planCard: { width: '48.6%', minHeight: 80, backgroundColor: '#1D2127', borderRadius: 12, borderWidth: 1, borderColor: '#353C46', padding: 11 },
-  planCardSelected: { backgroundColor: '#3A3014', borderColor: '#FFC83A', borderWidth: 2, padding: 10 },
-  planName: { color: '#ECEEF1', fontSize: 14, fontWeight: '800' },
-  planAmount: { color: '#ECEEF1', fontSize: 20, lineHeight: 24, fontWeight: '900', marginTop: 3 },
-  planDuration: { color: '#A6AEBB', fontSize: 13, marginTop: 1 },
-  personalTrainingRow: { marginTop: 16, minHeight: 80, borderRadius: 14, borderWidth: 1, borderColor: '#353C46', backgroundColor: '#1D2127', padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  planCard: { width: '48.5%', minHeight: 84, backgroundColor: '#181C22', borderRadius: 14, borderWidth: 1, borderColor: '#2A313D', padding: 13 },
+  planCardSelected: { backgroundColor: 'rgba(255, 200, 58, 0.12)', borderColor: '#FFC83A', borderWidth: 2, padding: 12 },
+  planName: { color: '#F3F5F7', fontSize: 14, fontWeight: '700' },
+  planAmount: { color: '#F3F5F7', fontSize: 20, lineHeight: 24, fontWeight: '900', marginTop: 4 },
+  planDuration: { color: '#9BA3B0', fontSize: 12, marginTop: 2 },
+  personalTrainingRow: { marginTop: 16, minHeight: 80, borderRadius: 14, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#181C22', padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12 },
   personalTrainingRowOpen: { borderBottomLeftRadius: 0, borderBottomRightRadius: 0, borderBottomWidth: 0, marginBottom: 0 },
-  trainingSwitch: { width: 45, height: 27, borderRadius: 14, backgroundColor: '#1D2127', padding: 3, justifyContent: 'center' },
-  trainingSwitchThumb: { width: 21, height: 21, borderRadius: 11, backgroundColor: '#FFFFFF', shadowColor: '#53606D', shadowOpacity: 0.2, shadowRadius: 2, elevation: 2 },
-  trainingSwitchThumbActive: { alignSelf: 'flex-end', backgroundColor: '#1C232D' },
+  trainingSwitch: { width: 46, height: 28, borderRadius: 14, backgroundColor: '#252B36', borderWidth: 1, borderColor: '#363F4E', padding: 3, justifyContent: 'center' },
+  trainingSwitchThumb: { width: 20, height: 20, borderRadius: 10, backgroundColor: '#9BA3B0' },
+  trainingSwitchThumbActive: { alignSelf: 'flex-end', backgroundColor: '#1A1400' },
   personalTrainingCopy: { flex: 1 },
-  personalTrainingTitle: { color: '#ECEEF1', fontSize: 16, fontWeight: '800' },
-  personalTrainingDetail: { color: '#A6AEBB', fontSize: 14, lineHeight: 19, marginTop: 3 },
-  personalTrainingPlanPanel: { marginTop: -1, borderWidth: 1, borderTopWidth: 0, borderColor: '#353C46', backgroundColor: '#1D2127', borderBottomLeftRadius: 14, borderBottomRightRadius: 14, paddingHorizontal: 14, paddingBottom: 14 },
-  personalTrainingPlanLabel: { color: '#A6AEBB', fontSize: 14, fontWeight: '700', marginBottom: 8 },
+  personalTrainingTitle: { color: '#F3F5F7', fontSize: 15, fontWeight: '800' },
+  personalTrainingDetail: { color: '#9BA3B0', fontSize: 13, lineHeight: 19, marginTop: 3 },
+  personalTrainingPlanPanel: { marginTop: -1, borderWidth: 1, borderTopWidth: 0, borderColor: '#2A313D', backgroundColor: '#181C22', borderBottomLeftRadius: 14, borderBottomRightRadius: 14, paddingHorizontal: 14, paddingBottom: 14 },
+  personalTrainingPlanLabel: { color: '#9BA3B0', fontSize: 13, fontWeight: '700', marginBottom: 8 },
   personalTrainingPlanCard: { minHeight: 80 },
-  checkbox: { width: 23, height: 23, borderRadius: 6, borderWidth: 1, borderColor: '#353C46', alignItems: 'center', justifyContent: 'center' },
-  checkboxSelected: { backgroundColor: '#FFC83A', borderColor: '#353C46' },
-  checkboxTick: { color: '#1A1400', fontSize: 18, fontWeight: '900' },
-  paymentSummary: { marginTop: 16, borderRadius: 12, backgroundColor: '#1D2127', paddingHorizontal: 14, paddingVertical: 12 },
+  checkbox: { width: 22, height: 22, borderRadius: 6, borderWidth: 1.5, borderColor: '#363F4E', backgroundColor: '#12151B', alignItems: 'center', justifyContent: 'center' },
+  checkboxSelected: { backgroundColor: '#FFC83A', borderColor: '#FFC83A' },
+  checkboxTick: { color: '#1A1400', fontSize: 15, fontWeight: '900' },
+  paymentSummary: { marginTop: 16, borderRadius: 14, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#181C22', paddingHorizontal: 15, paddingVertical: 14 },
   summaryLine: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  summaryLabel: { color: '#A6AEBB', fontSize: 15 },
-  summaryValue: { color: '#ECEEF1', fontSize: 15, fontWeight: '800' },
-  summaryDivider: { height: 1, borderTopWidth: 1, borderTopColor: '#353C46', borderStyle: 'dashed', marginVertical: 10 },
-  firstPayment: { color: '#ECEEF1', fontSize: 15, fontWeight: '800' },
-  firstPaymentAmount: { color: '#ECEEF1', fontSize: 22, fontWeight: '900' },
+  summaryLabel: { color: '#9BA3B0', fontSize: 14 },
+  summaryValue: { color: '#F3F5F7', fontSize: 14, fontWeight: '800' },
+  summaryDivider: { height: 1, borderTopWidth: 1, borderTopColor: '#2A313D', borderStyle: 'dashed', marginVertical: 10 },
+  firstPayment: { color: '#F3F5F7', fontSize: 15, fontWeight: '800' },
+  firstPaymentAmount: { color: '#FFC83A', fontSize: 22, fontWeight: '900' },
   twoColumnRow: { flexDirection: 'row', gap: 10, zIndex: 20 },
   columnField: { flex: 1, position: 'relative' },
-  inputSuffix: { position: 'absolute', right: 13, color: '#ECEEF1', fontSize: 18 },
-  moreDetailsHeader: { marginTop: 16, minHeight: 64, borderWidth: 1, borderColor: '#353C46', backgroundColor: '#1D2127', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  inputSuffix: { position: 'absolute', right: 13, color: '#F3F5F7', fontSize: 18 },
+  moreDetailsHeader: { marginTop: 16, minHeight: 64, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#181C22', borderRadius: 14, paddingHorizontal: 14, paddingVertical: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   moreDetailsTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  moreDetailsTitle: { color: '#ECEEF1', fontSize: 16, fontWeight: '800' },
-  optionalBadge: { color: '#A6AEBB', fontSize: 12, fontWeight: '800', letterSpacing: 0.5, borderRadius: 7, borderWidth: 1, borderColor: '#353C46', paddingHorizontal: 6, paddingVertical: 2 },
-  moreDetailsSubtitle: { color: '#A6AEBB', fontSize: 14, marginTop: 3 },
-  detailsChevron: { color: '#A6AEBB', fontSize: 29, lineHeight: 30 },
-  moreDetailsBody: { marginTop: -1, borderWidth: 1, borderTopWidth: 0, borderColor: '#353C46', backgroundColor: '#1D2127', borderBottomLeftRadius: 12, borderBottomRightRadius: 12, padding: 14 },
-  sectionLabel: { color: '#A6AEBB', fontSize: 13, fontWeight: '800', letterSpacing: 0.7, marginTop: 18, marginBottom: -1 },
+  moreDetailsTitle: { color: '#F3F5F7', fontSize: 15, fontWeight: '800' },
+  optionalBadge: { color: '#9BA3B0', fontSize: 11, fontWeight: '800', letterSpacing: 0.5, borderRadius: 6, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#12151B', paddingHorizontal: 7, paddingVertical: 2 },
+  moreDetailsSubtitle: { color: '#6E7785', fontSize: 13, marginTop: 3 },
+  detailsChevron: { color: '#9BA3B0', fontSize: 26, lineHeight: 28 },
+  moreDetailsBody: { marginTop: -1, borderWidth: 1, borderTopWidth: 0, borderColor: '#2A313D', backgroundColor: '#181C22', borderBottomLeftRadius: 14, borderBottomRightRadius: 14, padding: 14 },
+  sectionLabel: { color: '#9BA3B0', fontSize: 12, fontWeight: '800', letterSpacing: 0.8, textTransform: 'uppercase', marginTop: 18, marginBottom: -1 },
   welcomeMessageRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 18 },
   onboardingFooter: { marginTop: 16 },
-  welcomeToggle: { width: 43, height: 25, borderRadius: 13, backgroundColor: '#347851', padding: 3, justifyContent: 'center' },
-  welcomeToggleThumb: { width: 19, height: 19, borderRadius: 10, backgroundColor: '#FFFFFF', alignSelf: 'flex-end' },
-  welcomeToggleInactive: { backgroundColor: '#1D2127' },
+  welcomeToggle: { width: 44, height: 26, borderRadius: 13, backgroundColor: '#34D399', padding: 3, justifyContent: 'center' },
+  welcomeToggleThumb: { width: 20, height: 20, borderRadius: 10, backgroundColor: '#FFFFFF', alignSelf: 'flex-end' },
+  welcomeToggleInactive: { backgroundColor: '#252B36' },
   welcomeToggleThumbInactive: { alignSelf: 'flex-start' },
-  welcomeMessageText: { color: '#ECEEF1', fontSize: 15 },
-  successMessage: { color: '#5BCB89', fontSize: 15, lineHeight: 21, marginTop: 14, fontWeight: '700' },
-  completeOnboardButton: { height: 50, marginTop: 18, borderRadius: 12, backgroundColor: '#FFC83A', alignItems: 'center', justifyContent: 'center' },
+  welcomeMessageText: { color: '#F3F5F7', fontSize: 14, fontWeight: '600' },
+  successMessage: { color: '#34D399', fontSize: 14, lineHeight: 20, marginTop: 14, fontWeight: '700' },
+  completeOnboardButton: { height: 52, marginTop: 18, borderRadius: 14, backgroundColor: '#FFC83A', alignItems: 'center', justifyContent: 'center' },
 });
