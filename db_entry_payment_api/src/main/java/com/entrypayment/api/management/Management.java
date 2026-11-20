@@ -25,6 +25,10 @@ public class Management extends IstAuditedEntity {
   @Column(name = "mobile_number", nullable = false, length = 15)
   private String mobileNumber;
 
+  // Null means this account is the gym's primary management account.
+  @Column(name = "gym_management_id")
+  private Long gymManagementId;
+
   /** BCrypt hash once a management user configures a password; never store a plain password. */
   @Column(name = "pwd", length = 255)
   private String pwd;
@@ -49,6 +53,7 @@ public class Management extends IstAuditedEntity {
   public Long getId() { return id; }
   public String getName() { return name; }
   public String getMobileNumber() { return mobileNumber; }
+  public Long getGymManagementId() { return gymManagementId; }
   public String getPwd() { return pwd; }
   public String getOtp() { return otp; }
   public String getFcmId() { return fcmId; }

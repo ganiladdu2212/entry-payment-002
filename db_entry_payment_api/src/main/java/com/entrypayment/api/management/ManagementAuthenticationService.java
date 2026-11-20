@@ -67,6 +67,12 @@ public class ManagementAuthenticationService {
   }
 
   private ManagementLoginResponse loginResponse(Management management) {
-    return new ManagementLoginResponse(management.getId(), management.getName(), management.getMobileNumber(), sessions.issue(management.getId(), management.getId(), "MANAGEMENT"));
+    Long gymId = management.getGymManagementId() == null ? management.getId() : management.getGymManagementId();
+    Management gymOwner = managementRepository.findById(gymId)
+        .orElseThrow(() -> new ResponseStatusException(HttpStatus.FORBIDDEN, "Gym account is not configured."));
+    if (gymOwner.getGymManagementId() != null && !gymOwner.getGymManagementId().equals(gymId)) {
+      throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Gym account is not configured.");
+    }
+    return new ManagementLoginResponse(management.getId(), gymId, management.getName(), management.getMobileNumber(), sessions.issue(management.getId(), gymId, "MANAGEMENT"));
   }
 }
