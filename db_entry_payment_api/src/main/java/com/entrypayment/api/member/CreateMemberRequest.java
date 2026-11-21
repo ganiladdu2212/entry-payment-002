@@ -7,6 +7,9 @@ import jakarta.validation.constraints.FutureOrPresent;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.Size;
+import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Digits;
+import java.math.BigDecimal;
 import java.time.LocalDate;
 
 public record CreateMemberRequest(
@@ -27,4 +30,7 @@ public record CreateMemberRequest(
     @Size(max = 100) String emergencyContactName,
     @Pattern(regexp = "^$|^[6-9]\\d{9}$", message = "Emergency mobile must be a valid 10-digit Indian mobile number.") String emergencyContactMobile,
     @NotNull Boolean sendWhatsappWelcome,
-    @NotBlank @Size(max = 2000000) String photoData) {}
+    @NotBlank @Size(max = 2000000) String photoData,
+    LocalDate endDate,
+    @DecimalMin("0.01") @Digits(integer = 10, fraction = 2) BigDecimal membershipPriceOverride,
+    @DecimalMin("0.01") @Digits(integer = 10, fraction = 2) BigDecimal personalTrainingPriceOverride) {}

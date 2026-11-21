@@ -112,6 +112,9 @@ type MemberDetail = {
   personalTrainingPlanDurationMonths: number | null;
   startDate: string;
   expiresOn: string;
+  customEndDate?: string | null;
+  membershipPriceOverride?: number | null;
+  personalTrainingPriceOverride?: number | null;
   personalTrainingExpiresOn?: string | null;
   trainer: string;
   status: 'ACTIVE' | 'DUE_SOON' | 'OVERDUE' | 'PENDING';
@@ -959,7 +962,7 @@ function parseIsoDate(value: string) {
 function FutureDatePicker({ value, onChange }: { value: string; onChange: (value: string) => void }) {
   const insets = useSafeAreaInsets();
   const [open, setOpen] = useState(false);
-  const [visibleMonth, setVisibleMonth] = useState(() => parseIsoDate(value));
+  const [visibleMonth, setVisibleMonth] = useState(() => value ? parseIsoDate(value) : new Date());
   const monthStart = new Date(visibleMonth.getFullYear(), visibleMonth.getMonth(), 1);
   const firstDayOffset = (monthStart.getDay() + 6) % 7;
   const calendarStart = new Date(monthStart);
@@ -969,11 +972,11 @@ function FutureDatePicker({ value, onChange }: { value: string; onChange: (value
     date.setDate(calendarStart.getDate() + index);
     return date;
   });
-  const selectedDate = toIsoDate(parseIsoDate(value));
+  const selectedDate = value ? toIsoDate(parseIsoDate(value)) : '';
 
   return <View>
     <Pressable style={styles.dateField} onPress={() => setOpen(!open)}>
-      <Text style={styles.dateFieldText}>{value}</Text><Text style={styles.inputSuffix}>▣</Text>
+      <Text style={styles.dateFieldText}>{value || 'Select date'}</Text><Text style={styles.inputSuffix}>▣</Text>
     </Pressable>
     {open ? <View style={styles.calendarPanel}>
       <View style={styles.calendarHeader}><Pressable onPress={() => setVisibleMonth(new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() - 1, 1))}><Text style={styles.calendarArrow}>‹</Text></Pressable><Text style={styles.calendarMonth}>{visibleMonth.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })}</Text><Pressable onPress={() => setVisibleMonth(new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() + 1, 1))}><Text style={styles.calendarArrow}>›</Text></Pressable></View>
@@ -1561,6 +1564,10 @@ function CollectPaymentScreen({ managementId, actorName, actorRole, memberId, on
   const [trainingPlanId, setTrainingPlanId] = useState<number | null>(null);
   const [paymentMode, setPaymentMode] = useState<'UPI' | 'CASH'>('UPI');
   const [amount, setAmount] = useState('');
+  const [paymentStartDate, setPaymentStartDate] = useState('');
+  const [paymentEndDate, setPaymentEndDate] = useState('');
+  const [membershipPriceEdit, setMembershipPriceEdit] = useState<string | null>(null);
+  const [trainingPriceEdit, setTrainingPriceEdit] = useState<string | null>(null);
   const [utr, setUtr] = useState('');
   const [screenshotUri, setScreenshotUri] = useState<string | null>(null);
   const [screenshotData, setScreenshotData] = useState<string | null>(null);
@@ -1578,7 +1585,13 @@ function CollectPaymentScreen({ managementId, actorName, actorRole, memberId, on
   useEffect(() => {
     if (trainingPlanId !== null && !eligibleTrainingPlans.some((plan) => plan.id === trainingPlanId)) setTrainingPlanId(null);
   }, [membershipPlanId, trainingPlanId, membershipPlans, trainingPlans]);
-  const total = (selectedMembership?.amount ?? 0) + (selectedTraining?.amount ?? 0);
+  const defaultMembershipAmount = member?.status === 'PENDING' && member.membershipPlanId === membershipPlanId
+    && member.membershipPriceOverride != null ? member.membershipPriceOverride : selectedMembership?.amount ?? 0;
+  const defaultTrainingAmount = member?.status === 'PENDING' && member.personalTrainingPlanId === trainingPlanId
+    && member.personalTrainingPriceOverride != null ? member.personalTrainingPriceOverride : selectedTraining?.amount ?? 0;
+  const membershipAmount = membershipPriceEdit === null ? defaultMembershipAmount : Number(membershipPriceEdit) || 0;
+  const trainingAmount = trainingPriceEdit === null ? defaultTrainingAmount : Number(trainingPriceEdit) || 0;
+  const total = membershipAmount + trainingAmount;
 
   useEffect(() => {
     let active = true;
@@ -1613,8 +1626,10 @@ function CollectPaymentScreen({ managementId, actorName, actorRole, memberId, on
         setMembers(memberResponse.members);
         setMembershipPlanId(memberDetail.membershipPlanId ?? sortPlansByDuration(memberships)[0]?.id ?? null);
         setTrainingPlanId(memberDetail.personalTrainingPlanId);
-        const initialAmount = (memberships.find((plan) => plan.id === memberDetail.membershipPlanId)?.amount ?? 0)
-          + (trainings.find((plan) => plan.id === memberDetail.personalTrainingPlanId)?.amount ?? 0);
+        const initialAmount = (memberDetail.status === 'PENDING' && memberDetail.membershipPriceOverride != null
+          ? memberDetail.membershipPriceOverride : memberships.find((plan) => plan.id === memberDetail.membershipPlanId)?.amount ?? 0)
+          + (memberDetail.status === 'PENDING' && memberDetail.personalTrainingPriceOverride != null
+            ? memberDetail.personalTrainingPriceOverride : trainings.find((plan) => plan.id === memberDetail.personalTrainingPlanId)?.amount ?? 0);
         setAmount(String(initialAmount));
         setSendReceipt(false);
       } catch (requestError) {
@@ -1629,7 +1644,7 @@ function CollectPaymentScreen({ managementId, actorName, actorRole, memberId, on
 
   useEffect(() => {
     if (selectedMembership) setAmount(String(total));
-  }, [membershipPlanId, trainingPlanId]);
+  }, [membershipPlanId, trainingPlanId, member, membershipPriceEdit, trainingPriceEdit]);
 
   async function attachScreenshot() {
     setError('');
@@ -1695,6 +1710,9 @@ function CollectPaymentScreen({ managementId, actorName, actorRole, memberId, on
 
   async function savePayment() {
     if (!member || !membershipPlanId) { setError('Choose a membership plan.'); return; }
+    const validPrice = (value: string | null) => value === null || (/^\d{1,10}(\.\d{1,2})?$/.test(value) && Number(value) > 0);
+    if (!validPrice(membershipPriceEdit) || !validPrice(trainingPriceEdit)) { setError('Enter a valid plan price greater than zero, with up to two decimal places.'); return; }
+    if (paymentEndDate && paymentStartDate && paymentEndDate < paymentStartDate) { setError('End date cannot be before the start date.'); return; }
     const paidAmount = Number(amount.replace(/[^0-9.]/g, ''));
     if (!Number.isFinite(paidAmount) || paidAmount <= 0) { setError('Enter the amount received.'); return; }
     if (paymentMode === 'UPI' && (!screenshotUri || !screenshotData)) { setError('Attach the UPI payment screenshot before saving.'); return; }
@@ -1704,6 +1722,8 @@ function CollectPaymentScreen({ managementId, actorName, actorRole, memberId, on
     try {
       const response = await request<Payment>('/payments', {
         managementId, memberId: member.id, membershipPlanId, personalTrainingPlanId: selectedTraining?.id ?? null,
+        startDate: paymentStartDate || null, endDate: paymentEndDate || null,
+        membershipPriceOverride: membershipPriceEdit === null ? null : Number(membershipPriceEdit), personalTrainingPriceOverride: selectedTraining && trainingPriceEdit !== null ? Number(trainingPriceEdit) : null,
         amount: paidAmount, paymentMode, utr: paymentMode === 'UPI' ? utr : null, screenshotAttached: paymentMode === 'UPI' && Boolean(screenshotData), screenshotData: paymentMode === 'UPI' ? screenshotData : null, sendReceipt: member.sendWhatsappWelcome && sendReceipt, capturedBy: actorName,
       });
       if (sendReceipt && response.receiptSent) {
@@ -1730,6 +1750,10 @@ function CollectPaymentScreen({ managementId, actorName, actorRole, memberId, on
     setMembershipPlanId(null);
     setTrainingPlanId(null);
     setAmount('');
+    setPaymentStartDate('');
+    setPaymentEndDate('');
+    setMembershipPriceEdit(null);
+    setTrainingPriceEdit(null);
     setUtr('');
     setScreenshotUri(null);
     setScreenshotData(null);
@@ -1772,11 +1796,13 @@ function CollectPaymentScreen({ managementId, actorName, actorRole, memberId, on
       {!loading && !error ? <><Text style={styles.formLabel}>Member</Text><DropdownField value={selectedMemberId} placeholder="Choose a member" options={memberOptions} onSelect={(value) => selectMember(Number(value))} accessibilityLabel="Member" />{member ? <Text style={styles.collectMemberHint}>{member.membershipPlanName} · {paymentStatusText(member)}</Text> : null}</> : null}
       {!loading && !error && !member ? <View style={styles.collectEmptyState}><Text style={styles.collectEmptyText}>Choose a member to record their payment.{`\n`}Newest members are listed first.</Text></View> : null}
       {member ? <>
-        <View style={styles.twoColumnRow}><View style={styles.columnField}><Text style={styles.formLabel}>Membership plan</Text><DropdownField value={membershipPlanId} placeholder="Choose a plan" options={membershipOptions} onSelect={(value) => setMembershipPlanId(Number(value))} accessibilityLabel="Membership plan" /></View><View style={styles.columnField}><Text style={styles.formLabel}>Personal training</Text><DropdownField value={trainingPlanId ?? 'none'} placeholder="None" options={trainingOptions} onSelect={(value) => setTrainingPlanId(value === 'none' ? null : Number(value))} accessibilityLabel="Personal training" /></View></View>
-        <View style={styles.paymentSummary}><View style={styles.summaryLine}><Text style={styles.summaryLabel}>Membership · {selectedMembership?.name}</Text><Text style={styles.summaryValue}>₹{(selectedMembership?.amount ?? 0).toLocaleString('en-IN')}</Text></View>{selectedTraining ? <View style={[styles.summaryLine, styles.collectSummaryExtra]}><Text style={styles.summaryLabel}>Personal training · {selectedTraining.name}</Text><Text style={styles.summaryValue}>₹{selectedTraining.amount.toLocaleString('en-IN')}</Text></View> : null}<View style={styles.summaryDivider} /><View style={styles.summaryLine}><Text style={styles.firstPayment}>Total due</Text><Text style={[styles.firstPaymentAmount, { color: roleTheme.primary }]}>₹{total.toLocaleString('en-IN')}</Text></View></View>
+        <View style={styles.twoColumnRow}><View style={styles.columnField}><Text style={styles.formLabel}>Membership plan</Text><DropdownField value={membershipPlanId} placeholder="Choose a plan" options={membershipOptions} onSelect={(value) => { setMembershipPlanId(Number(value)); setMembershipPriceEdit(null); setTrainingPriceEdit(null); }} accessibilityLabel="Membership plan" /></View><View style={styles.columnField}><Text style={styles.formLabel}>Personal training</Text><DropdownField value={trainingPlanId ?? 'none'} placeholder="None" options={trainingOptions} onSelect={(value) => { setTrainingPlanId(value === 'none' ? null : Number(value)); setTrainingPriceEdit(null); }} accessibilityLabel="Personal training" /></View></View>
+        {selectedMembership ? <View><Pressable accessibilityRole="button" onPress={() => setMembershipPriceEdit(membershipPriceEdit === null ? String(defaultMembershipAmount) : null)}><Text style={styles.changeNumberText}>{membershipPriceEdit === null ? 'Edit membership price for this payment' : 'Use original membership price'}</Text></Pressable>{membershipPriceEdit !== null ? <><Text style={styles.formLabel}>Membership price for this payment (₹)</Text><TextInput value={membershipPriceEdit} onChangeText={setMembershipPriceEdit} keyboardType="decimal-pad" style={styles.formInput} accessibilityLabel="Membership price for this payment" /></> : null}</View> : null}
+        {selectedTraining ? <View><Pressable accessibilityRole="button" onPress={() => setTrainingPriceEdit(trainingPriceEdit === null ? String(defaultTrainingAmount) : null)}><Text style={styles.changeNumberText}>{trainingPriceEdit === null ? 'Edit personal-training price for this payment' : 'Use original personal-training price'}</Text></Pressable>{trainingPriceEdit !== null ? <><Text style={styles.formLabel}>Personal-training price for this payment (₹)</Text><TextInput value={trainingPriceEdit} onChangeText={setTrainingPriceEdit} keyboardType="decimal-pad" style={styles.formInput} accessibilityLabel="Personal-training price for this payment" /></> : null}</View> : null}
+        <View style={styles.paymentSummary}><View style={styles.summaryLine}><Text style={styles.summaryLabel}>Membership · {selectedMembership?.name}</Text><Text style={styles.summaryValue}>₹{membershipAmount.toLocaleString('en-IN')}</Text></View>{selectedTraining ? <View style={[styles.summaryLine, styles.collectSummaryExtra]}><Text style={styles.summaryLabel}>Personal training · {selectedTraining.name}</Text><Text style={styles.summaryValue}>₹{trainingAmount.toLocaleString('en-IN')}</Text></View> : null}<View style={styles.summaryDivider} /><View style={styles.summaryLine}><Text style={styles.firstPayment}>Total due</Text><Text style={[styles.firstPaymentAmount, { color: roleTheme.primary }]}>₹{total.toLocaleString('en-IN')}</Text></View></View>
         <View style={styles.twoColumnRow}><View style={styles.columnField}><Text style={styles.formLabel}>Amount (₹)</Text><TextInput value={amount} onChangeText={(value) => setAmount(value.replace(/[^0-9.]/g, ''))} keyboardType="decimal-pad" style={styles.formInput} /></View><View style={styles.columnField}><Text style={styles.formLabel}>Paid by</Text><View style={styles.paymentModeRow}><Pressable onPress={() => setPaymentMode('UPI')} style={[styles.paymentModeButton, paymentMode === 'UPI' && { backgroundColor: roleTheme.soft, borderWidth: 1, borderColor: roleTheme.border }]}><Text style={[styles.paymentModeButtonText, paymentMode === 'UPI' && { color: roleTheme.primary, fontWeight: '800' }]}>UPI</Text></Pressable><Pressable onPress={() => { setPaymentMode('CASH'); setUtr(''); setScreenshotUri(null); setScreenshotData(null); }} style={[styles.paymentModeButton, paymentMode === 'CASH' && { backgroundColor: roleTheme.soft, borderWidth: 1, borderColor: roleTheme.border }]}><Text style={[styles.paymentModeButtonText, paymentMode === 'CASH' && { color: roleTheme.primary, fontWeight: '800' }]}>Cash</Text></Pressable></View></View></View>
         {paymentMode === 'UPI' ? <><Text style={styles.formLabel}>UPI payment screenshot</Text><View style={styles.screenshotCard}>{screenshotUri ? <><Image source={{ uri: screenshotUri }} style={styles.screenshotPreview} /><View style={styles.screenshotCopy}><Text style={styles.screenshotAttachedText}>{readingUtr ? 'Reading Transaction ID…' : '✓ Receipt photo attached'}</Text>{ocrNote ? <Text style={styles.fieldNote}>{ocrNote}</Text> : null}<View style={styles.screenshotButtonRow}><Pressable onPress={() => void attachScreenshot()} disabled={readingUtr}><Text style={styles.replaceScreenshotText}>Retake</Text></Pressable><Pressable onPress={() => { setScreenshotUri(null); setScreenshotData(null); setOcrNote(''); }}><Text style={styles.replaceScreenshotText}>Remove</Text></Pressable></View></View></> : <><View style={styles.screenshotIconWrap}><Feather name="camera" size={24} color="#9BA3B0" /></View><Text style={styles.screenshotHint}>Take a photo of the PhonePe or Google Pay{`\n`}receipt to auto-fill the Transaction ID.</Text><View style={styles.screenshotButtonRow}><Pressable style={styles.attachScreenshotButton} onPress={() => void attachScreenshot()}><Feather name="camera" size={14} color="#F3F5F7" /><Text style={styles.attachScreenshotText}>Take receipt photo</Text></Pressable><Pressable style={styles.sampleScreenshotButton} onPress={useSampleScreenshot}><Text style={styles.sampleScreenshotText}>Use sample</Text></Pressable></View></>}</View><Text style={styles.formLabel}>Transaction ID</Text><TextInput value={utr} onChangeText={(value) => setUtr(value.replace(/\s+/g, ''))} autoCapitalize="none" autoCorrect={false} placeholder="Shown on PhonePe / Google Pay receipt" placeholderTextColor="#6E7785" style={styles.formInput} /></> : null}
-        <View style={styles.paymentValidity}><Text style={styles.paymentValidityLabel}>Membership validity</Text><Text style={styles.paymentValidityValue}>Valid till {selectedMembership ? (() => { const end = new Date(); end.setMonth(end.getMonth() + selectedMembership.durationMonths); return end.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }); })() : ''}</Text>{selectedTraining ? <Text style={styles.paymentValidityValue}>Personal training valid till {(() => { const end = new Date(); end.setMonth(end.getMonth() + selectedTraining.durationMonths); return end.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }); })()}</Text> : null}</View>
+        <View style={styles.paymentValidity}><Text style={styles.paymentValidityLabel}>Membership validity</Text><Text style={styles.fieldNote}>Leave dates blank to use the automatic dates. The end date applies to membership; personal training uses its plan duration from the start date.</Text><View style={styles.twoColumnRow}><View style={styles.columnField}><Text style={styles.formLabel}>Start date (optional)</Text><FutureDatePicker value={paymentStartDate} onChange={setPaymentStartDate} />{paymentStartDate ? <Pressable onPress={() => setPaymentStartDate('')}><Text style={styles.changeNumberText}>Use automatic start date</Text></Pressable> : null}</View><View style={styles.columnField}><Text style={styles.formLabel}>End date (optional)</Text><FutureDatePicker value={paymentEndDate} onChange={setPaymentEndDate} />{paymentEndDate ? <Pressable onPress={() => setPaymentEndDate('')}><Text style={styles.changeNumberText}>Use automatic end date</Text></Pressable> : null}</View></View>{member?.status === 'PENDING' && member.customEndDate && !paymentEndDate ? <Text style={styles.paymentValidityValue}>Onboarding end date: {parseIsoDate(member.customEndDate).toLocaleDateString('en-IN')}</Text> : null}</View>
         <Pressable disabled accessibilityState={{ disabled: true }} style={[styles.welcomeMessageRow, styles.disabledButton]} onPress={() => setSendReceipt(!sendReceipt)}><View style={[styles.welcomeToggle, !sendReceipt && styles.welcomeToggleInactive]}><View style={[styles.welcomeToggleThumb, !sendReceipt && styles.welcomeToggleThumbInactive]} /></View><View><Text style={styles.welcomeMessageText}>Send receipt on WhatsApp · unavailable</Text>{!member.sendWhatsappWelcome ? <Text style={styles.fieldNote}>This member has turned WhatsApp updates off.</Text> : null}</View></Pressable>
         <Pressable style={[styles.completeOnboardButton, { backgroundColor: roleTheme.primary }, saving && styles.disabledButton]} onPress={() => void savePayment()} disabled={saving}>{saving ? <ActivityIndicator color={roleTheme.onPrimary} /> : <Text style={[styles.primaryButtonText, { color: roleTheme.onPrimary }]}>Save payment · ₹{Number(amount || 0).toLocaleString('en-IN')}</Text>}</Pressable>
       </> : null}
@@ -1802,6 +1828,11 @@ function OnboardMemberScreen({ managementId, actorName, actorRole, onBack, onSav
   const [fullName, setFullName] = useState('');
   const [whatsappNumber, setWhatsappNumber] = useState('');
   const [startDate, setStartDate] = useState(() => toIsoDate(new Date()));
+  const [endDate, setEndDate] = useState('');
+  const [editingMembershipPrice, setEditingMembershipPrice] = useState(false);
+  const [membershipPriceInput, setMembershipPriceInput] = useState('');
+  const [editingTrainingPrice, setEditingTrainingPrice] = useState(false);
+  const [trainingPriceInput, setTrainingPriceInput] = useState('');
   const [trainers, setTrainers] = useState<Trainer[]>([]);
   const [trainerId, setTrainerId] = useState<number | null>(null);
   const [trainerListOpen, setTrainerListOpen] = useState(false);
@@ -1851,10 +1882,18 @@ function OnboardMemberScreen({ managementId, actorName, actorRole, onBack, onSav
   const eligiblePersonalTrainingPlans = personalTrainingPlans.filter((plan) => selectedPlan && plan.durationMonths <= selectedPlan.durationMonths);
   const selectedPersonalTrainingPlan = eligiblePersonalTrainingPlans.find((item) => item.id === personalTrainingPlanId);
   useEffect(() => {
-    if (!eligiblePersonalTrainingPlans.some((plan) => plan.id === personalTrainingPlanId)) setPersonalTrainingPlanId(null);
+    if (!eligiblePersonalTrainingPlans.some((plan) => plan.id === personalTrainingPlanId)) {
+      setPersonalTrainingPlanId(null);
+      setEditingTrainingPrice(false);
+      setTrainingPriceInput('');
+    }
   }, [membershipPlanId, personalTrainingPlanId, membershipPlans, personalTrainingPlans]);
   const selectedTrainer = trainers.find((item) => item.id === trainerId);
-  const firstPayment = (selectedPlan?.amount ?? 0) + (personalTraining ? selectedPersonalTrainingPlan?.amount ?? 0 : 0);
+  const editedMembershipPrice = Number(membershipPriceInput);
+  const membershipPrice = editingMembershipPrice && membershipPriceInput ? editedMembershipPrice : selectedPlan?.amount ?? 0;
+  const editedTrainingPrice = Number(trainingPriceInput);
+  const trainingPrice = editingTrainingPrice && trainingPriceInput ? editedTrainingPrice : selectedPersonalTrainingPlan?.amount ?? 0;
+  const firstPayment = membershipPrice + (personalTraining ? trainingPrice : 0);
 
   function currency(amount: number) {
     return `₹${amount.toLocaleString('en-IN')}`;
@@ -1912,6 +1951,15 @@ function OnboardMemberScreen({ managementId, actorName, actorRole, onBack, onSav
       setFormError('Select a personal-training plan.');
       return;
     }
+    if (endDate && endDate < startDate) { setFormError('End date cannot be before the start date.'); return; }
+    if (editingMembershipPrice && (!/^\d{1,10}(\.\d{1,2})?$/.test(membershipPriceInput) || editedMembershipPrice <= 0)) {
+      setFormError('Enter a valid membership price greater than zero, with up to two decimal places.');
+      return;
+    }
+    if (personalTraining && editingTrainingPrice && (!/^\d{1,10}(\.\d{1,2})?$/.test(trainingPriceInput) || editedTrainingPrice <= 0)) {
+      setFormError('Enter a valid personal-training price greater than zero, with up to two decimal places.');
+      return;
+    }
     if (email.trim() && !/^\S+@\S+\.\S+$/.test(email.trim())) { setMoreDetailsOpen(true); setFormError('Enter a valid email address.'); return; }
     if (pinCode && !/^\d{6}$/.test(pinCode)) { setMoreDetailsOpen(true); setFormError('PIN code must contain 6 digits.'); return; }
     if (emergencyContactMobile && !/^[6-9]\d{9}$/.test(emergencyContactMobile)) { setMoreDetailsOpen(true); setFormError('Enter a valid emergency mobile number.'); return; }
@@ -1928,6 +1976,9 @@ function OnboardMemberScreen({ managementId, actorName, actorRole, onBack, onSav
         membershipPlanId,
         personalTrainingPlanId: personalTraining ? personalTrainingPlanId : null,
         startDate,
+        endDate: endDate || null,
+        membershipPriceOverride: editingMembershipPrice ? editedMembershipPrice : null,
+        personalTrainingPriceOverride: personalTraining && editingTrainingPrice ? editedTrainingPrice : null,
         trainer: selectedTrainer.name,
         email: email.trim() || null,
         flatHouseNumber: flatHouseNumber.trim() || null,
@@ -1966,7 +2017,7 @@ function OnboardMemberScreen({ managementId, actorName, actorRole, onBack, onSav
   if (createdMember) {
     return <View style={styles.screen}><SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}><View style={styles.collectScreen}>
       <View style={styles.onboardHeader}><Pressable onPress={onSaved} hitSlop={12} style={styles.backIconBtn}><Feather name="chevron-left" size={24} color="#F3F5F7" /></Pressable><View style={styles.onboardHeading}><Text style={styles.onboardTitle}>Member added</Text><Text style={styles.onboardSubtitle}>First payment pending</Text></View><ProfileButton name={actorName} /></View>
-      <View style={styles.paymentSuccess}><View style={styles.successBadge}><Feather name="check" size={28} color="#34D399" /></View><Text style={styles.paymentSuccessTitle}>{firstName(fullName)} is ready to join</Text><Text style={styles.paymentSuccessText}>Their first payment of {currency(firstPayment)} is pending. Collect it to activate the {selectedPlan?.name ?? 'membership'} plan.</Text>{successMessage ? <Text style={styles.successMessage}>{successMessage}</Text> : null}<Pressable style={styles.completeOnboardButton} onPress={() => onCollect(createdMember.memberId)}><Text style={styles.primaryButtonText}>₹  Collect payment</Text></Pressable><Pressable style={styles.sampleScreenshotButton} onPress={() => { setCreatedMember(null); setFullName(''); setWhatsappNumber(''); removePhoto(); setMoreDetailsOpen(false); setSuccessMessage(''); }}><Text style={styles.sampleScreenshotText}>Add another member</Text></Pressable><Pressable style={styles.changeNumberButton} onPress={onSaved}><Text style={styles.changeNumberText}>View members</Text></Pressable></View>
+      <View style={styles.paymentSuccess}><View style={styles.successBadge}><Feather name="check" size={28} color="#34D399" /></View><Text style={styles.paymentSuccessTitle}>{firstName(fullName)} is ready to join</Text><Text style={styles.paymentSuccessText}>Their first payment of {currency(firstPayment)} is pending. Collect it to activate the {selectedPlan?.name ?? 'membership'} plan.</Text>{successMessage ? <Text style={styles.successMessage}>{successMessage}</Text> : null}<Pressable style={styles.completeOnboardButton} onPress={() => onCollect(createdMember.memberId)}><Text style={styles.primaryButtonText}>₹  Collect payment</Text></Pressable><Pressable style={styles.sampleScreenshotButton} onPress={() => { setCreatedMember(null); setFullName(''); setWhatsappNumber(''); setEndDate(''); setEditingMembershipPrice(false); setMembershipPriceInput(''); setEditingTrainingPrice(false); setTrainingPriceInput(''); removePhoto(); setMoreDetailsOpen(false); setSuccessMessage(''); }}><Text style={styles.sampleScreenshotText}>Add another member</Text></Pressable><Pressable style={styles.changeNumberButton} onPress={onSaved}><Text style={styles.changeNumberText}>View members</Text></Pressable></View>
       <BottomNavigation managementId={managementId} active="members" onHomePress={onHome} onMembersPress={onSaved} onCollectPress={() => onCollect(createdMember.memberId)} onPaymentsPress={onPayments} onRemindersPress={onReminders} />
     </View></SafeAreaView></View>;
   }
@@ -1999,8 +2050,9 @@ function OnboardMemberScreen({ managementId, actorName, actorRole, onBack, onSav
             <Text style={styles.formLabel}>WhatsApp number</Text>
             <View style={styles.whatsappRow}><View style={styles.countryCode}><Text style={styles.countryCodeText}>+91</Text></View><TextInput value={whatsappNumber} onChangeText={(value) => setWhatsappNumber(value.replace(/\D/g, '').slice(0, 10))} placeholder="10-digit mobile number" placeholderTextColor="#8D95A1" keyboardType="phone-pad" style={styles.phoneFormInput} /></View>
             <Text style={styles.formLabel}>Membership plan</Text>
-            {loadingPlans ? <ActivityIndicator color="#ECEEF1" style={styles.planLoading} /> : <View style={styles.planGrid}>{membershipPlans.map((item) => <Pressable key={item.id} onPress={() => setMembershipPlanId(item.id)} style={[styles.planCard, membershipPlanId === item.id && styles.planCardSelected]}><Text style={styles.planName}>{item.name}</Text><Text style={styles.planAmount}>{currency(item.amount)}</Text><Text style={styles.planDuration}>{planValidityText(item)}</Text></Pressable>)}</View>}
-            <Pressable style={[styles.personalTrainingRow, personalTraining && styles.personalTrainingRowOpen]} onPress={() => setPersonalTraining(!personalTraining)} accessibilityRole="switch" accessibilityState={{ checked: personalTraining }}>
+            {loadingPlans ? <ActivityIndicator color="#ECEEF1" style={styles.planLoading} /> : <View style={styles.planGrid}>{membershipPlans.map((item) => <Pressable key={item.id} onPress={() => { setMembershipPlanId(item.id); setEditingMembershipPrice(false); setMembershipPriceInput(''); }} style={[styles.planCard, membershipPlanId === item.id && styles.planCardSelected]}><Text style={styles.planName}>{item.name}</Text><Text style={styles.planAmount}>{currency(item.amount)}</Text><Text style={styles.planDuration}>{planValidityText(item)}</Text></Pressable>)}</View>}
+            {selectedPlan ? <View><Pressable accessibilityRole="button" onPress={() => { if (editingMembershipPrice) { setEditingMembershipPrice(false); setMembershipPriceInput(''); } else { setMembershipPriceInput(String(selectedPlan.amount)); setEditingMembershipPrice(true); } }}><Text style={styles.changeNumberText}>{editingMembershipPrice ? 'Use standard plan price' : 'Edit price for this member'}</Text></Pressable>{editingMembershipPrice ? <><Text style={styles.formLabel}>Membership price for this member (₹)</Text><TextInput value={membershipPriceInput} onChangeText={setMembershipPriceInput} keyboardType="decimal-pad" style={styles.formInput} accessibilityLabel="Membership price for this member" /><Text style={styles.fieldNote}>The standard plan price remains unchanged.</Text></> : null}</View> : null}
+            <Pressable style={[styles.personalTrainingRow, personalTraining && styles.personalTrainingRowOpen]} onPress={() => { setPersonalTraining(!personalTraining); setEditingTrainingPrice(false); setTrainingPriceInput(''); }} accessibilityRole="switch" accessibilityState={{ checked: personalTraining }}>
               <View style={styles.trainingSwitch}><View style={[styles.trainingSwitchThumb, personalTraining && styles.trainingSwitchThumbActive]} /></View>
               <View style={styles.personalTrainingCopy}><Text style={styles.personalTrainingTitle}>Add personal training</Text><Text style={styles.personalTrainingDetail}>One-on-one sessions with the trainer, paid along with the plan</Text></View>
             </Pressable>
@@ -2008,19 +2060,23 @@ function OnboardMemberScreen({ managementId, actorName, actorRole, onBack, onSav
               <View style={styles.personalTrainingPlanPanel}>
                 <Text style={styles.personalTrainingPlanLabel}>Personal training plan</Text>
                 <View style={styles.planGrid}>
-                  {eligiblePersonalTrainingPlans.map((item) => <Pressable key={item.id} onPress={() => setPersonalTrainingPlanId(item.id)} style={[styles.planCard, styles.personalTrainingPlanCard, personalTrainingPlanId === item.id && styles.planCardSelected]}><Text style={styles.planName}>{item.name}</Text><Text style={styles.planAmount}>{currency(item.amount)}</Text><Text style={styles.planDuration}>{planValidityText(item)}</Text></Pressable>)}
+                  {eligiblePersonalTrainingPlans.map((item) => <Pressable key={item.id} onPress={() => { setPersonalTrainingPlanId(item.id); setEditingTrainingPrice(false); setTrainingPriceInput(''); }} style={[styles.planCard, styles.personalTrainingPlanCard, personalTrainingPlanId === item.id && styles.planCardSelected]}><Text style={styles.planName}>{item.name}</Text><Text style={styles.planAmount}>{currency(item.amount)}</Text><Text style={styles.planDuration}>{planValidityText(item)}</Text></Pressable>)}
                   {eligiblePersonalTrainingPlans.length === 0 ? <Text style={styles.fieldNote}>No personal-training plans fit this membership duration.</Text> : null}
                 </View>
+                {selectedPersonalTrainingPlan ? <View><Pressable accessibilityRole="button" onPress={() => { if (editingTrainingPrice) { setEditingTrainingPrice(false); setTrainingPriceInput(''); } else { setTrainingPriceInput(String(selectedPersonalTrainingPlan.amount)); setEditingTrainingPrice(true); } }}><Text style={styles.changeNumberText}>{editingTrainingPrice ? 'Use standard personal-training price' : 'Edit personal-training price for this member'}</Text></Pressable>{editingTrainingPrice ? <><Text style={styles.formLabel}>Personal-training price for this member (₹)</Text><TextInput value={trainingPriceInput} onChangeText={setTrainingPriceInput} keyboardType="decimal-pad" style={styles.formInput} accessibilityLabel="Personal-training price for this member" /><Text style={styles.fieldNote}>The standard personal-training plan price remains unchanged.</Text></> : null}</View> : null}
               </View>
             </> : null}
             <View style={styles.paymentSummary}>
-              <View style={styles.summaryLine}><Text style={styles.summaryLabel}>Membership · {selectedPlan?.name}</Text><Text style={styles.summaryValue}>{selectedPlan ? currency(selectedPlan.amount) : ''}</Text></View>
-              {personalTraining ? <View style={styles.summaryLine}><Text style={styles.summaryLabel}>Personal training · {selectedPersonalTrainingPlan?.name}</Text><Text style={styles.summaryValue}>{selectedPersonalTrainingPlan ? currency(selectedPersonalTrainingPlan.amount) : ''}</Text></View> : null}
+              <View style={styles.summaryLine}><Text style={styles.summaryLabel}>Membership · {selectedPlan?.name}</Text><Text style={styles.summaryValue}>{selectedPlan ? currency(membershipPrice) : ''}</Text></View>
+              {personalTraining ? <View style={styles.summaryLine}><Text style={styles.summaryLabel}>Personal training · {selectedPersonalTrainingPlan?.name}</Text><Text style={styles.summaryValue}>{selectedPersonalTrainingPlan ? currency(trainingPrice) : ''}</Text></View> : null}
               <View style={styles.summaryDivider} />
               <View style={styles.summaryLine}><Text style={styles.firstPayment}>First payment</Text><Text style={styles.firstPaymentAmount}>{currency(firstPayment)}</Text></View>
             </View>
             <View style={styles.twoColumnRow}>
               <View style={styles.columnField}><Text style={styles.formLabel}>Start date</Text><FutureDatePicker value={startDate} onChange={setStartDate} /></View>
+              <View style={styles.columnField}><Text style={styles.formLabel}>End date (optional)</Text><FutureDatePicker value={endDate} onChange={setEndDate} />{endDate ? <Pressable onPress={() => setEndDate('')} accessibilityRole="button"><Text style={styles.changeNumberText}>Clear end date</Text></Pressable> : null}</View>
+            </View>
+            <View style={styles.twoColumnRow}>
               <View style={styles.columnField}><Text style={styles.formLabel}>Trainer</Text>
                 <Pressable disabled={actorRole === 'TRAINER'} style={[styles.dateField, actorRole === 'TRAINER' && styles.disabledButton]} onPress={() => setTrainerListOpen(!trainerListOpen)}><Text style={styles.dateFieldText}>{selectedTrainer?.name ?? 'Select trainer'}{actorRole === 'TRAINER' ? ' (you)' : ''}</Text><Text style={styles.inputSuffix}>{actorRole === 'TRAINER' ? '' : '⌄'}</Text></Pressable>
                 {trainerListOpen && actorRole !== 'TRAINER' ? <View style={styles.trainerList}>{trainers.map((item) => <Pressable key={item.id} style={[styles.trainerOption, trainerId === item.id && styles.trainerOptionSelected]} onPress={() => { setTrainerId(item.id); setTrainerListOpen(false); }}><Text style={styles.trainerOptionText}>{item.name}</Text>{item.mobileNumber ? <Text style={styles.trainerOptionMobile}>{item.mobileNumber}</Text> : null}</Pressable>)}</View> : null}
@@ -2498,7 +2554,7 @@ const styles = StyleSheet.create({
   phoneFormInput: { flex: 1, height: 48, color: '#F3F5F7', fontSize: 15, paddingHorizontal: 12 },
   dateField: { height: 48, borderRadius: 12, borderWidth: 1, borderColor: '#2A313D', backgroundColor: '#161A21', justifyContent: 'center', paddingHorizontal: 14 },
   dateFieldText: { color: '#F3F5F7', fontSize: 15 },
-  calendarPanel: { position: 'absolute', top: 54, left: 0, width: 300, borderWidth: 1, borderColor: '#2A313D', borderRadius: 14, backgroundColor: '#181C22', padding: 12, zIndex: 30, elevation: 10, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 12 },
+  calendarPanel: { width: '100%', maxWidth: 300, marginTop: 6, borderWidth: 1, borderColor: '#2A313D', borderRadius: 14, backgroundColor: '#181C22', padding: 12 },
   calendarHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
   calendarArrow: { color: '#F3F5F7', fontSize: 26, lineHeight: 28, paddingHorizontal: 6 },
   calendarArrowDisabled: { color: '#4B5563' },

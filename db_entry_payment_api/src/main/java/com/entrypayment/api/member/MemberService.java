@@ -39,6 +39,12 @@ public class MemberService {
 
   @Transactional
   public MemberCreatedResponse createMember(CreateMemberRequest request) {
+    if (request.endDate() != null && request.endDate().isBefore(request.startDate())) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "End date cannot be before the start date.");
+    }
+    if (request.personalTrainingPriceOverride() != null && request.personalTrainingPlanId() == null) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Select a personal-training plan before editing its price.");
+    }
     if (memberRepository.findByWhatsappNumber(request.whatsappNumber()).isPresent()) {
       throw new ResponseStatusException(HttpStatus.CONFLICT, "A member already uses this WhatsApp number.");
     }
@@ -66,17 +72,18 @@ public class MemberService {
 
     // A member is pending until their first payment. The start date is shown while pending;
     // paid validity is calculated when payment is collected.
-    LocalDate expiresOn = request.startDate();
+    LocalDate expiresOn = request.endDate() == null ? request.startDate() : request.endDate();
     LocalDate personalTrainingExpiresOn = personalTraining == null ? null : request.startDate();
     MemberSelectedPlan selectedPlan = memberSelectedPlanRepository.save(new MemberSelectedPlan(
-        member.getId(), membershipPlan.getId(), membershipPlan.getName(), membershipPlan.getAmount(),
+        member.getId(), membershipPlan.getId(), membershipPlan.getName(), request.membershipPriceOverride() == null ? membershipPlan.getAmount() : request.membershipPriceOverride(),
         membershipPlan.getDurationMonths(),
         personalTraining == null ? null : personalTraining.getId(),
         personalTraining == null ? null : personalTraining.getName(),
-        personalTraining == null ? null : personalTraining.getAmount(),
+        personalTraining == null ? null : request.personalTrainingPriceOverride() == null ? personalTraining.getAmount() : request.personalTrainingPriceOverride(),
         personalTraining == null ? null : personalTraining.getDurationMonths(),
         request.startDate(), expiresOn, personalTrainingExpiresOn, request.trainer()));
     selectedPlan.setSessionCounts(membershipPlan.getSessionCount(), personalTraining == null ? null : personalTraining.getSessionCount());
+    selectedPlan.setOnboardingOverrides(request.endDate(), request.membershipPriceOverride(), request.personalTrainingPriceOverride());
 
     return new MemberCreatedResponse(
         member.getId(), selectedPlan.getId(), selectedPlan.getStatus(), expiresOn, member.getCreatedDate());
@@ -128,7 +135,8 @@ public class MemberService {
         selectedPlan.getMembershipPlanDurationMonths(), selectedPlan.getPersonalTrainingPlanId(), selectedPlan.getPersonalTrainingPlanName(),
         selectedPlan.getPersonalTrainingPlanAmount(), selectedPlan.getPersonalTrainingPlanDurationMonths(),
         selectedPlan.getStartDate(), selectedPlan.getExpiresOn(), selectedPlan.getPersonalTrainingExpiresOn(), selectedPlan.getTrainer(),
-        statusFor(selectedPlan, today), selectedPlan.getMembershipSessionCount(), selectedPlan.getPersonalTrainingSessionCount());
+        statusFor(selectedPlan, today), selectedPlan.getMembershipSessionCount(), selectedPlan.getPersonalTrainingSessionCount(),
+        selectedPlan.getCustomEndDate(), selectedPlan.getMembershipPriceOverride(), selectedPlan.getPersonalTrainingPriceOverride());
   }
 
   @Transactional

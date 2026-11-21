@@ -57,6 +57,15 @@ public class MemberSelectedPlan extends IstAuditedEntity {
   @Column(name = "expires_on", nullable = false)
   private LocalDate expiresOn;
 
+  @Column(name = "custom_end_date")
+  private LocalDate customEndDate;
+
+  @Column(name = "membership_price_override", precision = 12, scale = 2)
+  private BigDecimal membershipPriceOverride;
+
+  @Column(name = "personal_training_price_override", precision = 12, scale = 2)
+  private BigDecimal personalTrainingPriceOverride;
+
   @Column(name = "personal_training_expires_on")
   private LocalDate personalTrainingExpiresOn;
 
@@ -100,6 +109,11 @@ public class MemberSelectedPlan extends IstAuditedEntity {
 
   public void markInactive() { this.status = "INACTIVE"; }
   public void markActive() { this.status = "ACTIVE"; }
+  public void setOnboardingOverrides(LocalDate endDate, BigDecimal price, BigDecimal trainingPrice) {
+    this.customEndDate = endDate;
+    this.membershipPriceOverride = price;
+    this.personalTrainingPriceOverride = trainingPrice;
+  }
   public void setSessionCounts(Integer membershipSessions, Integer personalTrainingSessions) {
     this.membershipSessionCount = membershipSessions;
     this.personalTrainingSessionCount = personalTrainingSessions;
@@ -119,6 +133,9 @@ public class MemberSelectedPlan extends IstAuditedEntity {
   public Integer getPersonalTrainingPlanDurationMonths() { return personalTrainingPlanDurationMonths; }
   public LocalDate getStartDate() { return startDate; }
   public LocalDate getExpiresOn() { return expiresOn; }
+  public LocalDate getCustomEndDate() { return customEndDate; }
+  public BigDecimal getMembershipPriceOverride() { return membershipPriceOverride; }
+  public BigDecimal getPersonalTrainingPriceOverride() { return personalTrainingPriceOverride; }
   public LocalDate getPersonalTrainingExpiresOn() { return personalTrainingExpiresOn; }
   public String getTrainer() { return trainer; }
   public String getStatus() { return status; }

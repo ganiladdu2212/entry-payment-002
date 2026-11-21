@@ -35,4 +35,7 @@ public record MemberDetailResponse(
     String trainer,
     String status,
     Integer membershipSessionCount,
-    Integer personalTrainingSessionCount) {}
+    Integer personalTrainingSessionCount,
+    LocalDate customEndDate,
+    BigDecimal membershipPriceOverride,
+    BigDecimal personalTrainingPriceOverride) {}

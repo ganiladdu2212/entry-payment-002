@@ -10,6 +10,7 @@ import com.entrypayment.api.member.Member;
 import com.entrypayment.api.member.MemberRepository;
 import com.entrypayment.api.member.MemberSelectedPlan;
 import com.entrypayment.api.member.MemberSelectedPlanRepository;
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.Comparator;
@@ -61,6 +62,9 @@ public class PaymentService {
           .filter(plan -> plan.getManagementId().equals(request.managementId()))
           .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Personal-training plan not found."));
     }
+    if (personalTraining == null && request.personalTrainingPriceOverride() != null) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Choose a personal-training plan before editing its price.");
+    }
     String mode = request.paymentMode().trim().toUpperCase();
     if (!mode.equals("UPI") && !mode.equals("CASH")) {
       throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Payment mode must be UPI or CASH.");
@@ -74,20 +78,35 @@ public class PaymentService {
     }
 
     MemberSelectedPlan latestPlan = latestPlanFor(member.getId());
+    boolean firstPayment = "PENDING".equals(latestPlan.getStatus());
     LocalDate today = LocalDate.now(IST);
-    LocalDate startDate = paymentRepository.existsByMemberSelectedPlanId(latestPlan.getId())
+    LocalDate calculatedStartDate = paymentRepository.existsByMemberSelectedPlanId(latestPlan.getId())
         && latestPlan.getExpiresOn().isAfter(today)
         ? latestPlan.getExpiresOn()
         : latestPlan.getStartDate().isAfter(today) ? latestPlan.getStartDate() : today;
-    LocalDate expiresOn = startDate.plusMonths(membership.getDurationMonths());
+    LocalDate startDate = request.startDate() == null ? calculatedStartDate : request.startDate();
+    LocalDate expiresOn = request.endDate() != null ? request.endDate()
+        : firstPayment && latestPlan.getCustomEndDate() != null
+            ? latestPlan.getCustomEndDate() : startDate.plusMonths(membership.getDurationMonths());
+    if (expiresOn.isBefore(startDate)) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "The selected end date is before the payment start date.");
+    }
+    BigDecimal membershipPrice = request.membershipPriceOverride() != null ? request.membershipPriceOverride()
+        : firstPayment && membership.getId().equals(latestPlan.getMembershipPlanId())
+        && latestPlan.getMembershipPriceOverride() != null ? latestPlan.getMembershipPriceOverride() : membership.getAmount();
+    BigDecimal trainingPrice = personalTraining == null ? null
+        : request.personalTrainingPriceOverride() != null ? request.personalTrainingPriceOverride()
+        : firstPayment && personalTraining.getId().equals(latestPlan.getPersonalTrainingPlanId())
+            && latestPlan.getPersonalTrainingPriceOverride() != null
+                ? latestPlan.getPersonalTrainingPriceOverride() : personalTraining.getAmount();
     LocalDate personalTrainingExpiresOn = personalTraining == null ? null : startDate.plusMonths(personalTraining.getDurationMonths());
     latestPlan.markInactive();
     selectedPlanRepository.save(latestPlan);
     MemberSelectedPlan paidPlan = new MemberSelectedPlan(
-        member.getId(), membership.getId(), membership.getName(), membership.getAmount(),
+        member.getId(), membership.getId(), membership.getName(), membershipPrice,
         membership.getDurationMonths(), personalTraining == null ? null : personalTraining.getId(),
         personalTraining == null ? null : personalTraining.getName(),
-        personalTraining == null ? null : personalTraining.getAmount(),
+        trainingPrice,
         personalTraining == null ? null : personalTraining.getDurationMonths(),
         startDate, expiresOn, personalTrainingExpiresOn, latestPlan.getTrainer());
     paidPlan.markActive();
